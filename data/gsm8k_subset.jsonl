@@ -1,0 +1,5 @@
+{"id": "gsm8k_1", "dataset": "gsm8k", "context": "", "question": "Tom has 3 apples and buys 4 more. How many apples does he have?", "answer": "7"}
+{"id": "gsm8k_2", "dataset": "gsm8k", "context": "", "question": "A bakery sells 12 cupcakes in the morning and 18 in the afternoon. How many cupcakes did they sell in total?", "answer": "30"}
+{"id": "gsm8k_3", "dataset": "gsm8k", "context": "", "question": "Sarah has $50. She spends $12 on lunch and $8 on a book. How much money does she have left?", "answer": "30"}
+{"id": "gsm8k_4", "dataset": "gsm8k", "context": "", "question": "A train travels 60 miles per hour. How far will it travel in 3 hours?", "answer": "180"}
+{"id": "gsm8k_5", "dataset": "gsm8k", "context": "", "question": "There are 24 students in a class. If they are divided into groups of 6, how many groups will there be?", "answer": "4"}

@@ -1,0 +1,27 @@
+# Virtual environments
+venv/
+venv311/
+
+#Kiro
+.kiro/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Model cache
+.cache/
+.huggingface/
+
+# Results (generated files)
+results/*.csv
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VSCode
+.vscode/
+
+# Misc
+.env
