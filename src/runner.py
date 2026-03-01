@@ -114,6 +114,8 @@ def main():
             if COMPRESSION_ENABLED:
                 init_compression(tokenizer)
 
+            compression_modes = [False, True] if COMPRESSION_ENABLED else [False]
+
             for idx, sample in enumerate(samples, start=1):
                 sid = sample["id"]
                 dataset_name = sample.get("dataset", "unknown")
@@ -123,58 +125,65 @@ def main():
 
                 prompt = build_prompt(context, question)
 
-                # Compression disabled in CPU mode
-                if COMPRESSION_ENABLED:
-                    prompt, orig_tokens, comp_tokens, compressed = maybe_compress_prompt(prompt)
-                else:
-                    orig_tokens = 0
-                    comp_tokens = 0
-                    compressed = False
+                # ==========================================
+                # Run BOTH: uncompressed and compressed
+                # ==========================================
 
-                # Generate answers
-                responses = generate_answers(
-                    llm,
-                    tokenizer,
-                    prompt,
-                    num_return_sequences=SELF_CONSISTENCY_SAMPLES
-                )
+                for apply_compression in compression_modes:
 
-                main_answer = responses[0] if responses else ""
+                    current_prompt = prompt
 
-                # Compute metrics
-                em = exact_match(main_answer, gold)
-                sc = self_consistency_score(responses, emb_model)
+                    if apply_compression:
+                        current_prompt, orig_tokens, comp_tokens, compressed = maybe_compress_prompt(prompt)
+                    else:
+                        orig_tokens = 0
+                        comp_tokens = 0
+                        compressed = False
 
-                premise = context if context.strip() else prompt
-                nli_score = nli_support_score(
-                    nli_model,
-                    nli_tokenizer,
-                    premise,
-                    main_answer
-                )
+                    # Generate answers
+                    responses = generate_answers(
+                        llm,
+                        tokenizer,
+                        current_prompt,
+                        num_return_sequences=SELF_CONSISTENCY_SAMPLES
+                    )
 
-                # Log result
-                row = {
-                    "id": sid,
-                    "dataset": dataset_name,
-                    "model_name": model_name,
-                    "compressed": int(compressed),
-                    "orig_tokens": orig_tokens,
-                    "compressed_tokens": comp_tokens,
-                    "prediction": main_answer,
-                    "exact_match": em,
-                    "self_consistency": sc,
-                    "nli_support": nli_score
-                }
+                    main_answer = responses[0] if responses else ""
 
-                writer.writerow(row)
-                results.append(row)
-                
-                print(
-                    f"[{idx}/{len(samples)}] "
-                    f"{dataset_name} | EM={em:.1f} | "
-                    f"SC={sc:.3f} | NLI={nli_score:.3f}"
-                )
+                    # Compute metrics
+                    em = exact_match(main_answer, gold)
+                    sc = self_consistency_score(responses, emb_model)
+
+                    premise = context if context.strip() else current_prompt
+                    nli_score = nli_support_score(
+                        nli_model,
+                        nli_tokenizer,
+                        premise,
+                        main_answer
+                    )
+
+                    row = {
+                        "id": sid,
+                        "dataset": dataset_name,
+                        "model_name": model_name,
+                        "compressed": int(compressed),
+                        "orig_tokens": orig_tokens,
+                        "compressed_tokens": comp_tokens,
+                        "prediction": main_answer,
+                        "exact_match": em,
+                        "self_consistency": sc,
+                        "nli_support": nli_score
+                    }
+
+                    writer.writerow(row)
+                    results.append(row)
+
+                    print(
+                        f"[{idx}/{len(samples)}] "
+                        f"{dataset_name} | "
+                        f"compressed={int(compressed)} | "
+                        f"EM={em:.1f} | SC={sc:.3f} | NLI={nli_score:.3f}"
+                    )
 
     # ===============================
     # Aggregation & Summary
