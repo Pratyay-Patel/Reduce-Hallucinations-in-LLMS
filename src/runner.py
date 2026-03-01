@@ -32,8 +32,10 @@ from src.models import (
     load_nli_model,
     load_embedding_model
 )
+
 from src.metrics import (
     exact_match,
+    keyword_match_score,
     self_consistency_score,
     nli_support_score
 )
@@ -100,6 +102,7 @@ def main():
                 "compressed_tokens",
                 "prediction",
                 "exact_match",
+                "keyword_match",
                 "self_consistency",
                 "nli_support"
             ]
@@ -114,6 +117,8 @@ def main():
             if COMPRESSION_ENABLED:
                 init_compression(tokenizer)
 
+            compression_modes = [False, True] if COMPRESSION_ENABLED else [False]
+
             for idx, sample in enumerate(samples, start=1):
                 sid = sample["id"]
                 dataset_name = sample.get("dataset", "unknown")
@@ -123,58 +128,67 @@ def main():
 
                 prompt = build_prompt(context, question)
 
-                # Compression disabled in CPU mode
-                if COMPRESSION_ENABLED:
-                    prompt, orig_tokens, comp_tokens, compressed = maybe_compress_prompt(prompt)
-                else:
-                    orig_tokens = 0
-                    comp_tokens = 0
-                    compressed = False
+                # ==========================================
+                # Run BOTH: uncompressed and compressed
+                # ==========================================
 
-                # Generate answers
-                responses = generate_answers(
-                    llm,
-                    tokenizer,
-                    prompt,
-                    num_return_sequences=SELF_CONSISTENCY_SAMPLES
-                )
+                for apply_compression in compression_modes:
 
-                main_answer = responses[0] if responses else ""
+                    current_prompt = prompt
 
-                # Compute metrics
-                em = exact_match(main_answer, gold)
-                sc = self_consistency_score(responses, emb_model)
+                    if apply_compression:
+                        current_prompt, orig_tokens, comp_tokens, compressed = maybe_compress_prompt(prompt)
+                    else:
+                        orig_tokens = 0
+                        comp_tokens = 0
+                        compressed = False
 
-                premise = context if context.strip() else prompt
-                nli_score = nli_support_score(
-                    nli_model,
-                    nli_tokenizer,
-                    premise,
-                    main_answer
-                )
+                    # Generate answers
+                    responses = generate_answers(
+                        llm,
+                        tokenizer,
+                        current_prompt,
+                        num_return_sequences=SELF_CONSISTENCY_SAMPLES
+                    )
 
-                # Log result
-                row = {
-                    "id": sid,
-                    "dataset": dataset_name,
-                    "model_name": model_name,
-                    "compressed": int(compressed),
-                    "orig_tokens": orig_tokens,
-                    "compressed_tokens": comp_tokens,
-                    "prediction": main_answer,
-                    "exact_match": em,
-                    "self_consistency": sc,
-                    "nli_support": nli_score
-                }
+                    main_answer = responses[0] if responses else ""
 
-                writer.writerow(row)
-                results.append(row)
-                
-                print(
-                    f"[{idx}/{len(samples)}] "
-                    f"{dataset_name} | EM={em:.1f} | "
-                    f"SC={sc:.3f} | NLI={nli_score:.3f}"
-                )
+                    # Compute metrics
+                    em = exact_match(main_answer, gold)
+                    km = keyword_match_score(main_answer, gold)
+                    sc = self_consistency_score(responses, emb_model)
+
+                    premise = context if context.strip() else current_prompt
+                    nli_score = nli_support_score(
+                        nli_model,
+                        nli_tokenizer,
+                        premise,
+                        main_answer
+                    )
+
+                    row = {
+                        "id": sid,
+                        "dataset": dataset_name,
+                        "model_name": model_name,
+                        "compressed": int(compressed),
+                        "orig_tokens": orig_tokens,
+                        "compressed_tokens": comp_tokens,
+                        "prediction": main_answer,
+                        "exact_match": em,
+                        "keyword_match": km,
+                        "self_consistency": sc,
+                        "nli_support": nli_score
+                    }
+
+                    writer.writerow(row)
+                    results.append(row)
+
+                    print(
+                        f"[{idx}/{len(samples)}] "
+                        f"{dataset_name} | "
+                        f"compressed={int(compressed)} | "
+                        f"EM={em:.1f} | SC={sc:.3f} | NLI={nli_score:.3f}"
+                    )
 
     # ===============================
     # Aggregation & Summary
@@ -190,11 +204,13 @@ def main():
         avg_em = sum(r["exact_match"] for r in rows) / len(rows)
         avg_sc = sum(r["self_consistency"] for r in rows) / len(rows)
         avg_nli = sum(r["nli_support"] for r in rows) / len(rows)
+        avg_km = sum(r["keyword_match"] for r in rows) / len(rows)
 
         return {
             "group": group_name,
             "count": len(rows),
             "avg_exact_match": round(avg_em, 4),
+            "avg_keyword_match": round(avg_km, 4),
             "avg_self_consistency": round(avg_sc, 4),
             "avg_nli_support": round(avg_nli, 4),
         }
@@ -229,6 +245,7 @@ def main():
                 "group",
                 "count",
                 "avg_exact_match",
+                "avg_keyword_match",
                 "avg_self_consistency",
                 "avg_nli_support",
             ],
@@ -243,6 +260,7 @@ def main():
             f"{row['group']} | "
             f"n={row['count']} | "
             f"EM={row['avg_exact_match']} | "
+            f"KM={row['avg_keyword_match']} | "
             f"SC={row['avg_self_consistency']} | "
             f"NLI={row['avg_nli_support']}"
         )
