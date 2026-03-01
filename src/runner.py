@@ -32,8 +32,10 @@ from src.models import (
     load_nli_model,
     load_embedding_model
 )
+
 from src.metrics import (
     exact_match,
+    keyword_match_score,
     self_consistency_score,
     nli_support_score
 )
@@ -100,6 +102,7 @@ def main():
                 "compressed_tokens",
                 "prediction",
                 "exact_match",
+                "keyword_match",
                 "self_consistency",
                 "nli_support"
             ]
@@ -152,6 +155,7 @@ def main():
 
                     # Compute metrics
                     em = exact_match(main_answer, gold)
+                    km = keyword_match_score(main_answer, gold)
                     sc = self_consistency_score(responses, emb_model)
 
                     premise = context if context.strip() else current_prompt
@@ -171,6 +175,7 @@ def main():
                         "compressed_tokens": comp_tokens,
                         "prediction": main_answer,
                         "exact_match": em,
+                        "keyword_match": km,
                         "self_consistency": sc,
                         "nli_support": nli_score
                     }
@@ -199,11 +204,13 @@ def main():
         avg_em = sum(r["exact_match"] for r in rows) / len(rows)
         avg_sc = sum(r["self_consistency"] for r in rows) / len(rows)
         avg_nli = sum(r["nli_support"] for r in rows) / len(rows)
+        avg_km = sum(r["keyword_match"] for r in rows) / len(rows)
 
         return {
             "group": group_name,
             "count": len(rows),
             "avg_exact_match": round(avg_em, 4),
+            "avg_keyword_match": round(avg_km, 4),
             "avg_self_consistency": round(avg_sc, 4),
             "avg_nli_support": round(avg_nli, 4),
         }
@@ -238,6 +245,7 @@ def main():
                 "group",
                 "count",
                 "avg_exact_match",
+                "avg_keyword_match",
                 "avg_self_consistency",
                 "avg_nli_support",
             ],
@@ -252,6 +260,7 @@ def main():
             f"{row['group']} | "
             f"n={row['count']} | "
             f"EM={row['avg_exact_match']} | "
+            f"KM={row['avg_keyword_match']} | "
             f"SC={row['avg_self_consistency']} | "
             f"NLI={row['avg_nli_support']}"
         )

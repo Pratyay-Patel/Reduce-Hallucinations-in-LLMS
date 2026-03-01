@@ -3,6 +3,8 @@ import string
 import numpy as np
 import torch
 import torch.nn.functional as F
+import nltk
+from nltk.corpus import stopwords
 
 
 # ==============================
@@ -42,6 +44,8 @@ def _extract_last_number(text: str):
     return None
 
 
+STOPWORDS = set(stopwords.words('english'))
+
 # ==============================
 # Exact Match (Upgraded)
 # ==============================
@@ -70,6 +74,36 @@ def exact_match(prediction: str, gold: str) -> float:
 
     return float(norm_pred == norm_gold)
 
+
+# ==============================
+# Keyword Match (Semantic Lenient)
+# ==============================
+
+def keyword_match_score(prediction: str, gold: str) -> float:
+    """
+    Compute keyword overlap score.
+    Returns 1.0 if all gold keywords appear in prediction.
+    """
+
+    if not prediction or not gold:
+        return 0.0
+
+    norm_pred = _normalize_text(prediction)
+    norm_gold = _normalize_text(gold)
+
+    gold_tokens = [
+        t for t in norm_gold.split()
+        if t not in STOPWORDS
+    ]
+
+    pred_tokens = set(norm_pred.split())
+
+    if not gold_tokens:
+        return 0.0
+
+    match_count = sum(1 for t in gold_tokens if t in pred_tokens)
+
+    return float(match_count == len(gold_tokens))
 
 # ==============================
 # Self-Consistency (unchanged)
