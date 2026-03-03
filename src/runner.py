@@ -22,7 +22,8 @@ from src.config import (
     RESULTS_PATH,
     SELF_CONSISTENCY_SAMPLES,
     SEED,
-    COMPRESSION_ENABLED
+    COMPRESSION_ENABLED,
+    NLI_HALLUCINATION_THRESHOLD
 )
 
 from src.dataset import load_all_datasets
@@ -104,7 +105,8 @@ def main():
                 "exact_match",
                 "keyword_match",
                 "self_consistency",
-                "nli_support"
+                "nli_support",
+                "hallucination"
             ]
         )
         writer.writeheader()
@@ -116,6 +118,8 @@ def main():
             # Compression init only if enabled
             if COMPRESSION_ENABLED:
                 init_compression(tokenizer)
+
+            #compression_modes = [False, True] if COMPRESSION_ENABLED else [False]
 
             compression_modes = [False, True] if COMPRESSION_ENABLED else [False]
 
@@ -166,6 +170,8 @@ def main():
                         main_answer
                     )
 
+                    hallucination = float(nli_score < NLI_HALLUCINATION_THRESHOLD)
+
                     row = {
                         "id": sid,
                         "dataset": dataset_name,
@@ -177,7 +183,8 @@ def main():
                         "exact_match": em,
                         "keyword_match": km,
                         "self_consistency": sc,
-                        "nli_support": nli_score
+                        "nli_support": nli_score,
+                        "hallucination": hallucination
                     }
 
                     writer.writerow(row)
@@ -195,6 +202,58 @@ def main():
     # ===============================
     print("\nComputing aggregated metrics...")
 
+    # ===============================
+    # Delta Analysis (Compression Effect)
+    # ===============================
+
+    print("\nComputing delta analysis...")
+
+    # Group by sample id
+    from collections import defaultdict
+
+    sample_groups = defaultdict(list)
+
+    for r in results:
+        sample_groups[r["id"]].append(r)
+
+    delta_rows = []
+
+    for sid, rows in sample_groups.items():
+        if len(rows) != 2:
+            continue  # skip if missing one mode
+
+        uncompressed = next(r for r in rows if r["compressed"] == 0)
+        compressed = next(r for r in rows if r["compressed"] == 1)
+
+        delta_nli = compressed["nli_support"] - uncompressed["nli_support"]
+        delta_hall = compressed["hallucination"] - uncompressed["hallucination"]
+
+        delta_rows.append({
+            "id": sid,
+            "dataset": uncompressed["dataset"],
+            "delta_nli": delta_nli,
+            "delta_hallucination": delta_hall
+        })
+
+    # Compute statistics
+    total = len(delta_rows)
+    improved = sum(1 for d in delta_rows if d["delta_nli"] > 0)
+    worsened = sum(1 for d in delta_rows if d["delta_nli"] < 0)
+    unchanged = total - improved - worsened
+
+    
+    avg_delta_nli = (
+    sum(d["delta_nli"] for d in delta_rows) / total
+    if total > 0 else 0.0
+    )
+
+    print("\n===== Delta Analysis =====")
+    print(f"Total samples: {total}")
+    print(f"Improved (NLI ↑): {improved} ({improved/total:.2%})")
+    print(f"Worsened (NLI ↓): {worsened} ({worsened/total:.2%})")
+    print(f"Unchanged: {unchanged}")
+    print(f"Average ΔNLI: {avg_delta_nli:.4f}")
+
     summary_rows = []
 
     def compute_group_stats(group_name, rows):
@@ -205,6 +264,7 @@ def main():
         avg_sc = sum(r["self_consistency"] for r in rows) / len(rows)
         avg_nli = sum(r["nli_support"] for r in rows) / len(rows)
         avg_km = sum(r["keyword_match"] for r in rows) / len(rows)
+        avg_hallucination = sum(r["hallucination"] for r in rows) / len(rows)
 
         return {
             "group": group_name,
@@ -213,6 +273,7 @@ def main():
             "avg_keyword_match": round(avg_km, 4),
             "avg_self_consistency": round(avg_sc, 4),
             "avg_nli_support": round(avg_nli, 4),
+            "hallucination_rate": round(avg_hallucination, 4)
         }
 
     # Overall
@@ -248,6 +309,7 @@ def main():
                 "avg_keyword_match",
                 "avg_self_consistency",
                 "avg_nli_support",
+                "hallucination_rate"
             ],
         )
         writer.writeheader()
@@ -262,7 +324,8 @@ def main():
             f"EM={row['avg_exact_match']} | "
             f"KM={row['avg_keyword_match']} | "
             f"SC={row['avg_self_consistency']} | "
-            f"NLI={row['avg_nli_support']}"
+            f"NLI={row['avg_nli_support']} | "
+            f"HALL={row['hallucination_rate']}"
         )
 
     print(f"\nSummary saved to: {summary_path}")
