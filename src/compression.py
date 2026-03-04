@@ -7,6 +7,7 @@ track token counts, and manage the LLMLingua-2 compression model.
 
 from typing import Tuple
 from src.config import COMPRESSION_THRESHOLD_TOKENS, LLMLINGUA_MODEL
+from src.config import FORCE_COMPRESSION
 
 # Global compressor instance
 _compressor = None
@@ -81,7 +82,7 @@ def maybe_compress_prompt(prompt: str) -> Tuple[str, int, int, bool]:
     orig_tokens = count_tokens(prompt)
     
     # Check if compression is needed
-    if orig_tokens <= COMPRESSION_THRESHOLD_TOKENS:
+    if not FORCE_COMPRESSION and orig_tokens <= COMPRESSION_THRESHOLD_TOKENS:
         # No compression needed
         return prompt, orig_tokens, orig_tokens, False
     

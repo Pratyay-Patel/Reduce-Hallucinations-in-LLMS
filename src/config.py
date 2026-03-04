@@ -41,6 +41,10 @@ COMPRESSION_ENABLED: bool = True
 # Token threshold for compression (compress if prompt exceeds this)
 COMPRESSION_THRESHOLD_TOKENS: int = 100
 
+NLI_HALLUCINATION_THRESHOLD = 0.5
+
+FORCE_COMPRESSION = True
+
 # LLMLingua-2 model for compression
 LLMLINGUA_MODEL: str = "microsoft/llmlingua-2-bert-base-multilingual-cased-meetingbank"
 
@@ -71,7 +75,7 @@ TEMPERATURE_DEFAULT: float = 0.7
 TOP_P_DEFAULT: float = 0.9
 
 # Number of answer samples to generate for self-consistency measurement
-SELF_CONSISTENCY_SAMPLES: int = 3
+SELF_CONSISTENCY_SAMPLES: int = 1
 
 # ============================================================================
 # Reproducibility
