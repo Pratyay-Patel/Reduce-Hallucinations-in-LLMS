@@ -39,3 +39,32 @@ with open("data/squad_v2_subset.jsonl", "w", encoding="utf-8") as f:
             "answer": answer
         }
         f.write(json.dumps(row) + "\n")
+
+
+# -----------------------
+# HotpotQA
+# -----------------------
+hotpot = load_dataset("hotpot_qa", "distractor", split="validation[:30]")
+
+with open("data/hotpotqa_subset.jsonl", "w", encoding="utf-8") as f:
+
+    for idx, row in enumerate(hotpot):
+
+        titles = row["context"]["title"]
+        sentences = row["context"]["sentences"]
+
+        context = ""
+
+        for title, sent_list in zip(titles, sentences):
+            paragraph = " ".join(sent_list)
+            context += f"{title}: {paragraph}\n\n"
+
+        sample = {
+            "id": f"hotpot_{idx+1}",
+            "dataset": "hotpot_qa",
+            "context": context,
+            "question": row["question"],
+            "answer": row["answer"]
+        }
+
+        f.write(json.dumps(sample) + "\n")

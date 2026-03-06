@@ -141,7 +141,8 @@ def nli_support_score(model, tokenizer, premise: str, hypothesis: str) -> float:
         premise,
         hypothesis,
         return_tensors="pt",
-        truncation=True
+        truncation="only_first",
+        max_length=512
     )
 
     with torch.no_grad():

@@ -15,7 +15,7 @@ from typing import List
 LLM_MODELS: List[str] = [
    "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 #,
-#    "microsoft/Phi-3-mini-4k-instruct"
+   #"microsoft/Phi-3-mini-4k-instruct"
 ]
 
 # NLI model for entailment checking
@@ -55,7 +55,8 @@ LLMLINGUA_MODEL: str = "microsoft/llmlingua-2-bert-base-multilingual-cased-meeti
 # Paths to dataset JSONL files
 DATA_PATHS: List[str] = [
     "data/gsm8k_subset.jsonl",
-    "data/squad_v2_subset.jsonl"
+    "data/squad_v2_subset.jsonl",
+    "data/hotpotqa_subset.jsonl"
 ]
 
 # Path for results CSV output
@@ -66,7 +67,7 @@ RESULTS_PATH: str = "results/experiment_results.csv"
 # ============================================================================
 
 # Maximum number of new tokens to generate
-MAX_NEW_TOKENS: int = 64
+MAX_NEW_TOKENS: int = 128
 
 # Default temperature for sampling (0 = deterministic)
 TEMPERATURE_DEFAULT: float = 0.7

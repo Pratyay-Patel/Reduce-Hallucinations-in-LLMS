@@ -39,21 +39,26 @@ def load_llm(model_name: str) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     """
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
-        trust_remote_code=True
+        trust_remote_code=True,
+        low_cpu_mem_usage=True
     )
 
     # Safety: ensure pad_token exists
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        trust_remote_code=True,
-        torch_dtype=torch.float32,
-        low_cpu_mem_usage=True
+    model =AutoModelForCausalLM.from_pretrained(
+    model_name,
+    torch_dtype=torch.float16,
+    device_map="auto"
     )
 
-    model.to(DEVICE)
+    print("CUDA available:", torch.cuda.is_available())
+
+    if torch.cuda.is_available():
+        print("GPU:", torch.cuda.get_device_name(0))
+
+    #model.to(DEVICE)
     
     model.eval()
     

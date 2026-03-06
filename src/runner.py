@@ -87,6 +87,10 @@ def main():
 
     print("Loading datasets...")
     samples = list(load_all_datasets(DATA_PATHS))
+
+    # # Add long-context dataset (HotpotQA)
+    # samples.extend(load_hotpotqa_samples(limit=30))
+
     print(f"Loaded {len(samples)} samples.")
 
     results = []
@@ -124,6 +128,8 @@ def main():
             compression_modes = [False, True] if COMPRESSION_ENABLED else [False]
 
             for idx, sample in enumerate(samples, start=1):
+                if sample["dataset"]!="hotpot_qa":
+                    continue
                 sid = sample["id"]
                 dataset_name = sample.get("dataset", "unknown")
                 context = sample.get("context", "")
@@ -131,6 +137,9 @@ def main():
                 gold = sample.get("answer", "")
 
                 prompt = build_prompt(context, question)
+
+                prompt_len = len(tokenizer.encode(prompt))
+                print(f"Prompt tokens: {prompt_len} | dataset: {dataset_name}")
 
                 # ==========================================
                 # Run BOTH: uncompressed and compressed
@@ -163,6 +172,18 @@ def main():
                     sc = self_consistency_score(responses, emb_model)
 
                     premise = context if context.strip() else current_prompt
+                    
+                    # --------------------------------------------------
+                    # Truncate premise for NLI model (max ~512 tokens)
+                    # --------------------------------------------------
+                    premise_tokens = nli_tokenizer.encode(premise)
+
+                    if len(premise_tokens) > 400:
+                        premise_tokens = premise_tokens[:400]
+                        premise = nli_tokenizer.decode(premise_tokens)
+
+                    # --------------------------------------------------
+
                     nli_score = nli_support_score(
                         nli_model,
                         nli_tokenizer,
