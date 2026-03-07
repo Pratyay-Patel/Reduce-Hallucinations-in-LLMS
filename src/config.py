@@ -56,7 +56,8 @@ LLMLINGUA_MODEL: str = "microsoft/llmlingua-2-bert-base-multilingual-cased-meeti
 DATA_PATHS: List[str] = [
     "data/gsm8k_subset.jsonl",
     "data/squad_v2_subset.jsonl",
-    "data/hotpotqa_subset.jsonl"
+    "data/hotpotqa_subset.jsonl",
+    "data/triviaqa_subset.jsonl"
 ]
 
 # Path for results CSV output

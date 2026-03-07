@@ -68,3 +68,28 @@ with open("data/hotpotqa_subset.jsonl", "w", encoding="utf-8") as f:
         }
 
         f.write(json.dumps(sample) + "\n")
+
+# -----------------------
+# TriviaQA
+# -----------------------
+
+trivia = load_dataset("trivia_qa", "rc", split="train", streaming=True)
+
+with open("data/triviaqa_subset.jsonl", "w", encoding="utf-8") as f:
+    for i, sample in enumerate(trivia):
+
+        if i >= 30:
+            break
+
+        context = sample["entity_pages"]["wiki_context"][0] if sample["entity_pages"]["wiki_context"] else ""
+        answer = sample["answer"]["value"]
+
+        row = {
+            "id": f"trivia_{i+1}",
+            "dataset": "trivia_qa",
+            "context": context,
+            "question": sample["question"],
+            "answer": answer
+        }
+
+        f.write(json.dumps(row) + "\n")

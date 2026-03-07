@@ -128,8 +128,8 @@ def main():
             compression_modes = [False, True] if COMPRESSION_ENABLED else [False]
 
             for idx, sample in enumerate(samples, start=1):
-                if sample["dataset"]!="hotpot_qa":
-                    continue
+                # if sample["dataset"]!="hotpot_qa":
+                #     continue
                 sid = sample["id"]
                 dataset_name = sample.get("dataset", "unknown")
                 context = sample.get("context", "")
@@ -138,8 +138,8 @@ def main():
 
                 prompt = build_prompt(context, question)
 
-                prompt_len = len(tokenizer.encode(prompt))
-                print(f"Prompt tokens: {prompt_len} | dataset: {dataset_name}")
+                orig_prompt_tokens = len(tokenizer(prompt).input_ids)
+                print(f"Prompt tokens: {orig_prompt_tokens} | dataset: {dataset_name}")
 
                 # ==========================================
                 # Run BOTH: uncompressed and compressed
@@ -150,10 +150,12 @@ def main():
                     current_prompt = prompt
 
                     if apply_compression:
-                        current_prompt, orig_tokens, comp_tokens, compressed = maybe_compress_prompt(prompt)
+                        current_prompt, _, comp_tokens, compressed = maybe_compress_prompt(prompt)
+                        orig_tokens=orig_prompt_tokens
                     else:
-                        orig_tokens = 0
-                        comp_tokens = 0
+                        current_prompt=prompt
+                        orig_tokens=orig_prompt_tokens
+                        comp_tokens = orig_tokens
                         compressed = False
 
                     # Generate answers
@@ -214,7 +216,8 @@ def main():
                     print(
                         f"[{idx}/{len(samples)}] "
                         f"{dataset_name} | "
-                        f"compressed={int(compressed)} | "
+                        f"compressed={int(compressed)} | ",
+                        f"tokens={orig_tokens}->{comp_tokens} | ",
                         f"EM={em:.1f} | SC={sc:.3f} | NLI={nli_score:.3f}"
                     )
 
