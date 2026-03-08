@@ -128,8 +128,10 @@ def main():
             compression_modes = [False, True] if COMPRESSION_ENABLED else [False]
 
             for idx, sample in enumerate(samples, start=1):
-                # if sample["dataset"]!="hotpot_qa":
+                # if sample["dataset"] not in ["gsm8k", "squad_v2"]:
                 #     continue
+                if sample["dataset"] not in ["hotpot_qa", "trivia_qa"]:
+                    continue
                 sid = sample["id"]
                 dataset_name = sample.get("dataset", "unknown")
                 context = sample.get("context", "")

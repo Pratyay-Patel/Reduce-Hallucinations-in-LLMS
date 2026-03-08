@@ -39,7 +39,7 @@ DEVICE: str = "cpu"  # Use "cpu" if GPU not available
 COMPRESSION_ENABLED: bool = True
 
 # Token threshold for compression (compress if prompt exceeds this)
-COMPRESSION_THRESHOLD_TOKENS: int = 100
+COMPRESSION_THRESHOLD_TOKENS: int = 1000
 
 NLI_HALLUCINATION_THRESHOLD = 0.5
 
