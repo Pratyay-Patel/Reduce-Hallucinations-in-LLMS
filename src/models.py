@@ -8,8 +8,9 @@ This module handles loading and inference for all neural network models:
 """
 
 from typing import List, Tuple
+import gc
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModelForSequenceClassification
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModelForSequenceClassification, BitsAndBytesConfig
 from sentence_transformers import SentenceTransformer
 
 from src.config import (
@@ -17,9 +18,27 @@ from src.config import (
     MAX_NEW_TOKENS,
     TEMPERATURE_DEFAULT,
     TOP_P_DEFAULT,
+    USE_FP16,
+    USE_4BIT,
+    HF_TOKEN,
     NLI_MODEL_NAME,
     EMB_MODEL_NAME
 )
+
+
+def load_with_optional_token(model_name, loader_fn, **kwargs):
+    if HF_TOKEN:
+        try:
+            print("[INFO] Using Hugging Face token for model access")
+            return loader_fn(model_name, token=HF_TOKEN, **kwargs)
+        except Exception as e:
+            print(f"[WARN] Token-based load failed: {e}")
+
+    if "meta-llama" in model_name:
+        raise ValueError("HF_TOKEN is required for gated models like LLaMA")
+
+    print("[INFO] Loading public model without token")
+    return loader_fn(model_name, **kwargs)
 
 
 def load_llm(model_name: str) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
@@ -37,31 +56,80 @@ def load_llm(model_name: str) -> Tuple[AutoModelForCausalLM, AutoTokenizer]:
     
     Requirements: 2.1
     """
-    tokenizer = AutoTokenizer.from_pretrained(
+    print(f"Loading model: {model_name}")
+
+    if "Llama-2-7b-chat-hf" in model_name:
+        print("Loading gated model (LLaMA-2)... checking HF_TOKEN in environment")
+
+    tokenizer = load_with_optional_token(
         model_name,
-        trust_remote_code=True,
-        low_cpu_mem_usage=True
+        AutoTokenizer.from_pretrained,
+        trust_remote_code=True
     )
 
     # Safety: ensure pad_token exists
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    model =AutoModelForCausalLM.from_pretrained(
-    model_name,
-    torch_dtype=torch.float16,
-    device_map="auto"
-    )
+    # device_map="auto" lets Transformers place weights on available GPU memory.
+    # This is critical for fitting 7B/8B models reliably on 32GB cards.
+    preferred_dtype = torch.float16 if USE_FP16 and torch.cuda.is_available() else torch.float32
+    model = None
+
+    try:
+        model = load_with_optional_token(
+            model_name,
+            AutoModelForCausalLM.from_pretrained,
+            torch_dtype=preferred_dtype,
+            device_map="auto",
+            low_cpu_mem_usage=True,
+            trust_remote_code=True
+        )
+        if preferred_dtype == torch.float16 and torch.cuda.is_available():
+            print("[INFO] Loaded using FP16 with automatic GPU mapping.")
+        else:
+            print("[INFO] Loaded using automatic device mapping.")
+    except RuntimeError as err:
+        # If OOM or CUDA initialization fails, try optional 4-bit loading first.
+        print(f"[WARN] Primary GPU load failed: {err}")
+        if USE_4BIT and torch.cuda.is_available():
+            print("[INFO] Retrying with 4-bit quantization...")
+            try:
+                quant_config = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16
+                )
+                model = load_with_optional_token(
+                    model_name,
+                    AutoModelForCausalLM.from_pretrained,
+                    quantization_config=quant_config,
+                    device_map="auto",
+                    low_cpu_mem_usage=True,
+                    trust_remote_code=True
+                )
+                print("[INFO] Loaded using 4-bit quantization with auto device map.")
+            except Exception as quant_err:
+                print(f"[WARN] 4-bit load failed: {quant_err}")
+
+        # Final fallback path: force CPU so runs do not crash in production scripts.
+        if model is None:
+            print("[WARN] Falling back to CPU inference for this model.")
+            model = load_with_optional_token(
+                model_name,
+                AutoModelForCausalLM.from_pretrained,
+                torch_dtype=torch.float32,
+                device_map="cpu",
+                low_cpu_mem_usage=True,
+                trust_remote_code=True
+            )
 
     print("CUDA available:", torch.cuda.is_available())
 
     if torch.cuda.is_available():
         print("GPU:", torch.cuda.get_device_name(0))
 
-    #model.to(DEVICE)
-    
     model.eval()
-    
+
     return model, tokenizer
 
 
@@ -162,3 +230,15 @@ def load_embedding_model() -> SentenceTransformer:
     model = SentenceTransformer(EMB_MODEL_NAME, device=DEVICE)
     
     return model
+
+
+def clear_gpu() -> None:
+    """
+    Best-effort GPU memory cleanup between large-model runs.
+
+    This helps avoid fragmentation/OOM when loading multiple 7B/8B models
+    sequentially in one process.
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()

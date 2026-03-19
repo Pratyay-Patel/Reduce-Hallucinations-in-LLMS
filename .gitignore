@@ -15,6 +15,7 @@ __pycache__/
 
 # Results (generated files)
 results/*.csv
+results/
 
 # OS
 .DS_Store

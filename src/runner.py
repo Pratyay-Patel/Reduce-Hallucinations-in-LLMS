@@ -17,6 +17,7 @@ import torch
 import os
 
 from src.config import (
+    HF_TOKEN,
     LLM_MODELS,
     DATA_PATHS,
     RESULTS_PATH,
@@ -31,7 +32,8 @@ from src.models import (
     load_llm,
     generate_answers,
     load_nli_model,
-    load_embedding_model
+    load_embedding_model,
+    clear_gpu
 )
 
 from src.metrics import (
@@ -76,6 +78,9 @@ def build_prompt(context: str, question: str) -> str:
 
 
 def main():
+    if any("meta-llama" in m for m in LLM_MODELS) and not HF_TOKEN:
+        print("[ERROR] HF_TOKEN not found. Gated models will fail.")
+
     print("Setting random seeds...")
     set_random_seeds(SEED)
 
@@ -92,6 +97,7 @@ def main():
     # samples.extend(load_hotpotqa_samples(limit=30))
 
     print(f"Loaded {len(samples)} samples.")
+    print(f"Running {len(samples)} samples across {len(LLM_MODELS)} models...")
 
     results = []
 
@@ -117,7 +123,12 @@ def main():
 
         for model_name in LLM_MODELS:
             print(f"\nLoading LLM: {model_name}")
-            llm, tokenizer = load_llm(model_name)
+            try:
+                llm, tokenizer = load_llm(model_name)
+            except Exception as err:
+                print(f"[WARN] Skipping model '{model_name}' due to load failure: {err}")
+                clear_gpu()
+                continue
 
             # Compression init only if enabled
             if COMPRESSION_ENABLED:
@@ -127,21 +138,24 @@ def main():
 
             compression_modes = [False, True] if COMPRESSION_ENABLED else [False]
 
+            seen_datasets = set()
+
             for idx, sample in enumerate(samples, start=1):
-                # if sample["dataset"] not in ["gsm8k", "squad_v2"]:
-                #     continue
-                if sample["dataset"] not in ["hotpot_qa", "trivia_qa"]:
-                    continue
+                # Run ALL datasets (small + large).
                 sid = sample["id"]
                 dataset_name = sample.get("dataset", "unknown")
                 context = sample.get("context", "")
                 question = sample["question"]
                 gold = sample.get("answer", "")
 
+                if idx == 1 or dataset_name not in seen_datasets:
+                    print(f"Starting dataset: {dataset_name}")
+                    seen_datasets.add(dataset_name)
+
                 prompt = build_prompt(context, question)
 
                 orig_prompt_tokens = len(tokenizer(prompt).input_ids)
-                print(f"Prompt tokens: {orig_prompt_tokens} | dataset: {dataset_name}")
+                print(f"[INFO] Tokens: {orig_prompt_tokens} | Dataset: {dataset_name}")
 
                 # ==========================================
                 # Run BOTH: uncompressed and compressed
@@ -180,7 +194,12 @@ def main():
                     # --------------------------------------------------
                     # Truncate premise for NLI model (max ~512 tokens)
                     # --------------------------------------------------
-                    premise_tokens = nli_tokenizer.encode(premise)
+                    #premise_tokens = nli_tokenizer.encode(premise)
+
+                    if nli_tokenizer is None:
+                        premise_tokens = []
+                    else:
+                        premise_tokens = nli_tokenizer.encode(premise)
 
                     if len(premise_tokens) > 400:
                         premise_tokens = premise_tokens[:400]
@@ -188,12 +207,22 @@ def main():
 
                     # --------------------------------------------------
 
-                    nli_score = nli_support_score(
-                        nli_model,
-                        nli_tokenizer,
-                        premise,
-                        main_answer
-                    )
+                    # nli_score = nli_support_score(
+                    #     nli_model,
+                    #     nli_tokenizer,
+                    #     premise,
+                    #     main_answer
+                    # )
+                    if nli_tokenizer is None or nli_model is None:
+                        nli_score = 0.0
+                    else:
+                        nli_score = nli_support_score(
+                            nli_model,
+                            nli_tokenizer,
+                            premise,
+                            main_answer
+                        )
+
 
                     hallucination = float(nli_score < NLI_HALLUCINATION_THRESHOLD)
 
@@ -222,6 +251,12 @@ def main():
                         f"tokens={orig_tokens}->{comp_tokens} | ",
                         f"EM={em:.1f} | SC={sc:.3f} | NLI={nli_score:.3f}"
                     )
+
+            # Free memory between model runs to avoid fragmentation/OOM when
+            # running multiple large models sequentially in one process.
+            del llm
+            del tokenizer
+            clear_gpu()
 
     # ===============================
     # Aggregation & Summary
@@ -275,8 +310,15 @@ def main():
 
     print("\n===== Delta Analysis =====")
     print(f"Total samples: {total}")
-    print(f"Improved (NLI ↑): {improved} ({improved/total:.2%})")
-    print(f"Worsened (NLI ↓): {worsened} ({worsened/total:.2%})")
+    # print(f"Improved (NLI ↑): {improved} ({improved/total:.2%})")
+    # print(f"Worsened (NLI ↓): {worsened} ({worsened/total:.2%})")
+
+    if total > 0:
+        print(f"Improved (NLI ↑): {improved} ({improved/total:.2%})")
+        print(f"Worsened (NLI ↓): {worsened} ({worsened/total:.2%})")
+    else:
+        print("No delta comparison available (compression disabled or insufficient data).")
+        
     print(f"Unchanged: {unchanged}")
     print(f"Average ΔNLI: {avg_delta_nli:.4f}")
 

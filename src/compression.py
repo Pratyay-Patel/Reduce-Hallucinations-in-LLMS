@@ -29,11 +29,19 @@ def init_compression(llm_tokenizer, llmlingua_model: str = LLMLINGUA_MODEL):
     from llmlingua import PromptCompressor
     
     _llm_tokenizer = llm_tokenizer
-    _compressor = PromptCompressor(
-    model_name=llmlingua_model,
-    use_llmlingua2=True,
-    device_map="cpu"   # 🔥 force CPU
-    )
+
+    # device_map="auto" allows compressor placement on available accelerators.
+    # If initialization fails, we disable compression instead of crashing runs.
+    try:
+        _compressor = PromptCompressor(
+            model_name=llmlingua_model,
+            use_llmlingua2=True,
+            device_map="auto"
+        )
+        print("[INFO] Prompt compression initialized.")
+    except Exception as err:
+        print(f"[WARN] Compression model failed ({err}); disabling compression.")
+        _compressor = None
 
 
 def count_tokens(text: str) -> int:
@@ -51,6 +59,7 @@ def count_tokens(text: str) -> int:
     """
     if _llm_tokenizer is None:
         # Safe fallback during staged development
+        print("[WARN] Tokenizer not initialized. Skipping compression.")
         return 0
     
     tokens = _llm_tokenizer.encode(text)
@@ -76,6 +85,7 @@ def maybe_compress_prompt(prompt: str) -> Tuple[str, int, int, bool]:
     """
     if _compressor is None or _llm_tokenizer is None:
         # Safe fallback: no compression applied
+        print("[WARN] Tokenizer not initialized. Skipping compression.")
         return prompt, 0, 0, False
     
     # Count original tokens

@@ -6,16 +6,27 @@ paths, hyperparameters, and reproducibility settings.
 """
 
 from typing import List
+import os
+import torch
+from dotenv import load_dotenv
+
+load_dotenv()
+
+HF_TOKEN = os.getenv("HF_TOKEN")
 
 # ============================================================================
 # Model Configurations
 # ============================================================================
 
-# LLM models to test in the experiment
+# LLM models to test in the experiment.
+# Ordered to run sequentially with explicit cleanup between models in runner.py.
+# LLaMA-2 is included as a classical 7B baseline.
+# LLaMA-3 is included as a modern architecture baseline.
 LLM_MODELS: List[str] = [
-   "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-#,
-   #"microsoft/Phi-3-mini-4k-instruct"
+    "microsoft/Phi-3-mini-4k-instruct",
+    "mistralai/Mistral-7B-Instruct-v0.2",
+    "meta-llama/Llama-2-7b-chat-hf",
+    "meta-llama/Meta-Llama-3-8B-Instruct"
 ]
 
 # NLI model for entailment checking
@@ -28,8 +39,9 @@ EMB_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
 # Hardware Configuration
 # ============================================================================
 
-# Device for model inference
-DEVICE: str = "cpu"  # Use "cpu" if GPU not available
+# Device for model inference.
+# Auto-select CUDA when available; all model loaders can still fall back to CPU.
+DEVICE: str = "cuda" if torch.cuda.is_available() else "cpu"
 
 # ============================================================================
 # Compression Settings
@@ -38,8 +50,9 @@ DEVICE: str = "cpu"  # Use "cpu" if GPU not available
 # Enable/disable prompt compression
 COMPRESSION_ENABLED: bool = True
 
-# Token threshold for compression (compress if prompt exceeds this)
-COMPRESSION_THRESHOLD_TOKENS: int = 1000
+# Token threshold for compression (compress if prompt exceeds this).
+# Raised to reduce over-compression on long-context prompts while still controlling GPU memory.
+COMPRESSION_THRESHOLD_TOKENS: int = 2000
 
 NLI_HALLUCINATION_THRESHOLD = 0.5
 
@@ -67,8 +80,15 @@ RESULTS_PATH: str = "results/experiment_results.csv"
 # Generation Parameters
 # ============================================================================
 
-# Maximum number of new tokens to generate
-MAX_NEW_TOKENS: int = 128
+# Maximum number of new tokens to generate.
+# Reduced to cap decode-time memory and latency for 7B/8B models on 32GB VRAM.
+MAX_NEW_TOKENS: int = 64
+
+# Large-model loading safety toggles.
+# FP16 halves activation/weight memory vs FP32 on supported GPUs.
+# 4-bit can be enabled as an emergency path when OOM occurs.
+USE_FP16: bool = True
+USE_4BIT: bool = False
 
 # Default temperature for sampling (0 = deterministic)
 TEMPERATURE_DEFAULT: float = 0.7
