@@ -78,6 +78,11 @@ def build_prompt(context: str, question: str) -> str:
 
 
 def main():
+    from datetime import datetime
+
+    RUN_ID = datetime.now().strftime("%Y%m%d_%H%M%S")
+    TIMESTAMP = datetime.now().isoformat()
+
     if any("meta-llama" in m for m in LLM_MODELS) and not HF_TOKEN:
         print("[ERROR] HF_TOKEN not found. Gated models will fail.")
 
@@ -101,7 +106,14 @@ def main():
 
     results = []
 
-    with open(RESULTS_PATH, "w", newline="", encoding="utf-8") as f:
+    file_exists = os.path.exists(RESULTS_PATH)
+
+    if file_exists:
+        print("[INFO] Appending results to existing CSV file.")
+    else:
+        print("[INFO] Creating new results CSV file.")
+
+    with open(RESULTS_PATH, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(
             f,
             fieldnames=[
@@ -116,10 +128,13 @@ def main():
                 "keyword_match",
                 "self_consistency",
                 "nli_support",
-                "hallucination"
+                "hallucination",
+                "run_id",
+                "timestamp",
             ]
         )
-        writer.writeheader()
+        if not file_exists or os.stat(RESULTS_PATH).st_size == 0:
+            writer.writeheader()
 
         for model_name in LLM_MODELS:
             print(f"\nLoading LLM: {model_name}")
@@ -238,7 +253,9 @@ def main():
                         "keyword_match": km,
                         "self_consistency": sc,
                         "nli_support": nli_score,
-                        "hallucination": hallucination
+                        "hallucination": hallucination,
+                        "run_id": RUN_ID,
+                        "timestamp": TIMESTAMP,
                     }
 
                     writer.writerow(row)
