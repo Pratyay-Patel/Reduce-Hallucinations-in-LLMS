@@ -106,6 +106,9 @@ def main():
 
     results = []
 
+    results_dir = os.path.dirname(RESULTS_PATH) or "results"
+    os.makedirs(results_dir, exist_ok=True)
+
     file_exists = os.path.exists(RESULTS_PATH)
 
     if file_exists:
