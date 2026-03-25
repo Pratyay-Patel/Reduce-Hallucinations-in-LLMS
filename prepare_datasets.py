@@ -1,10 +1,12 @@
 from datasets import load_dataset
 import json
 
+TARGET_SAMPLES = 1000
+
 # -----------------------
 # GSM8K
 # -----------------------
-gsm8k = load_dataset("gsm8k", "main", split="train[:30]")
+gsm8k = load_dataset("gsm8k", "main", split=f"train[:{TARGET_SAMPLES}]")
 
 with open("data/gsm8k_subset.jsonl", "w", encoding="utf-8") as f:
     for i, sample in enumerate(gsm8k):
@@ -22,29 +24,34 @@ with open("data/gsm8k_subset.jsonl", "w", encoding="utf-8") as f:
 # -----------------------
 # SQuAD v2
 # -----------------------
-squad = load_dataset("squad_v2", split="train[:30]")
+squad = load_dataset("squad_v2", split="train")
 
 with open("data/squad_v2_subset.jsonl", "w", encoding="utf-8") as f:
+    written = 0
     for i, sample in enumerate(squad):
         if sample["answers"]["text"]:
             answer = sample["answers"]["text"][0]
         else:
             continue
 
+        if written >= TARGET_SAMPLES:
+            break
+
         row = {
-            "id": f"squad_{i+1}",
+            "id": f"squad_{written+1}",
             "dataset": "squad_v2",
             "context": sample["context"],
             "question": sample["question"],
             "answer": answer
         }
         f.write(json.dumps(row) + "\n")
+        written += 1
 
 
 # -----------------------
 # HotpotQA
 # -----------------------
-hotpot = load_dataset("hotpot_qa", "distractor", split="validation[:30]")
+hotpot = load_dataset("hotpot_qa", "distractor", split=f"validation[:{TARGET_SAMPLES}]")
 
 with open("data/hotpotqa_subset.jsonl", "w", encoding="utf-8") as f:
 
@@ -78,7 +85,7 @@ trivia = load_dataset("trivia_qa", "rc", split="train", streaming=True)
 with open("data/triviaqa_subset.jsonl", "w", encoding="utf-8") as f:
     for i, sample in enumerate(trivia):
 
-        if i >= 30:
+        if i >= TARGET_SAMPLES:
             break
 
         context = sample["entity_pages"]["wiki_context"][0] if sample["entity_pages"]["wiki_context"] else ""
