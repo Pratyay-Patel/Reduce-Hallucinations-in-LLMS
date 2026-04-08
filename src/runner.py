@@ -77,6 +77,69 @@ def build_prompt(context: str, question: str) -> str:
     )
 
 
+def _to_int(value, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _checkpoint_key(sample_id, dataset_name: str, model_name: str, compressed) -> tuple:
+    return (str(sample_id), str(dataset_name), str(model_name), _to_int(compressed))
+
+
+def load_existing_results(path: str):
+    """
+    Load existing result rows for checkpoint resume and full-run aggregation.
+    """
+    checkpoint_keys = set()
+    parsed_rows = []
+
+    if not os.path.exists(path) or os.path.getsize(path) == 0:
+        return checkpoint_keys, parsed_rows
+
+    with open(path, "r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+
+        # If header is missing/corrupt, skip parsing and start fresh appends.
+        if reader.fieldnames is None:
+            return checkpoint_keys, parsed_rows
+
+        for row in reader:
+            sid = row.get("id", "")
+            dataset_name = row.get("dataset", "unknown")
+            model_name = row.get("model_name", "")
+            compressed = _to_int(row.get("compressed", 0))
+
+            checkpoint_keys.add(_checkpoint_key(sid, dataset_name, model_name, compressed))
+
+            parsed_rows.append({
+                "id": sid,
+                "dataset": dataset_name,
+                "model_name": model_name,
+                "compressed": compressed,
+                "orig_tokens": _to_int(row.get("orig_tokens", 0)),
+                "compressed_tokens": _to_int(row.get("compressed_tokens", 0)),
+                "prediction": row.get("prediction", ""),
+                "exact_match": _to_float(row.get("exact_match", 0.0)),
+                "keyword_match": _to_float(row.get("keyword_match", 0.0)),
+                "self_consistency": _to_float(row.get("self_consistency", 0.0)),
+                "nli_support": _to_float(row.get("nli_support", 0.0)),
+                "hallucination": _to_float(row.get("hallucination", 0.0)),
+                "run_id": row.get("run_id", ""),
+                "timestamp": row.get("timestamp", ""),
+            })
+
+    return checkpoint_keys, parsed_rows
+
+
 def main():
     from datetime import datetime
 
@@ -104,7 +167,10 @@ def main():
     print(f"Loaded {len(samples)} samples.")
     print(f"Running {len(samples)} samples across {len(LLM_MODELS)} models...")
 
-    results = []
+    checkpoint_keys, existing_results = load_existing_results(RESULTS_PATH)
+    results = list(existing_results)
+    skipped_count = 0
+    written_count = 0
 
     results_dir = os.path.dirname(RESULTS_PATH) or "results"
     os.makedirs(results_dir, exist_ok=True)
@@ -113,6 +179,7 @@ def main():
 
     if file_exists:
         print("[INFO] Appending results to existing CSV file.")
+        print(f"[INFO] Loaded {len(checkpoint_keys)} completed checkpoints.")
     else:
         print("[INFO] Creating new results CSV file.")
 
@@ -180,6 +247,10 @@ def main():
                 # ==========================================
 
                 for apply_compression in compression_modes:
+                    checkpoint = _checkpoint_key(sid, dataset_name, model_name, int(apply_compression))
+                    if checkpoint in checkpoint_keys:
+                        skipped_count += 1
+                        continue
 
                     current_prompt = prompt
 
@@ -262,7 +333,9 @@ def main():
                     }
 
                     writer.writerow(row)
+                    checkpoint_keys.add(checkpoint)
                     results.append(row)
+                    written_count += 1
 
                     print(
                         f"[{idx}/{len(samples)}] "
@@ -282,6 +355,8 @@ def main():
     # Aggregation & Summary
     # ===============================
     print("\nComputing aggregated metrics...")
+    print(f"[INFO] New rows written this run: {written_count}")
+    print(f"[INFO] Rows skipped via checkpoint resume: {skipped_count}")
 
     # ===============================
     # Delta Analysis (Compression Effect)
