@@ -6,6 +6,8 @@ import torch.nn.functional as F
 import nltk
 from nltk.corpus import stopwords
 
+from src.config import DEVICE
+
 
 # ==============================
 # Helper Functions for EM
@@ -144,6 +146,7 @@ def nli_support_score(model, tokenizer, premise: str, hypothesis: str) -> float:
         truncation="only_first",
         max_length=512
     )
+    inputs = inputs.to(DEVICE)
 
     with torch.no_grad():
         outputs = model(**inputs)
