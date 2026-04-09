@@ -162,8 +162,28 @@ def generate_answers(
     
     Requirements: 2.2, 2.4
     """
-    # Tokenize input
-    inputs = tokenizer(prompt, return_tensors="pt")
+    # Tokenize input with an explicit cap so long-context datasets do not exceed
+    # the model's maximum sequence length and trigger attention OOMs.
+    model_max_length = getattr(model.config, "max_position_embeddings", None)
+    if model_max_length is None:
+        model_max_length = getattr(tokenizer, "model_max_length", 4096)
+    if not model_max_length or model_max_length > 100000:
+        model_max_length = 4096
+
+    max_input_length = max(1, int(model_max_length) - int(max_new_tokens) - 8)
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=max_input_length,
+    )
+
+    input_token_count = inputs["input_ids"].shape[1]
+    if input_token_count >= max_input_length:
+        print(
+            f"[WARN] Prompt truncated to {input_token_count} tokens "
+            f"to fit within the model context window ({model_max_length})."
+        )
 
     # Move to model device safely (works with device_map="auto")
     model_device = next(model.parameters()).device
