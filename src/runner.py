@@ -95,6 +95,24 @@ def _checkpoint_key(sample_id, dataset_name: str, model_name: str, compressed) -
     return (str(sample_id), str(dataset_name), str(model_name), _to_int(compressed))
 
 
+def _is_oom_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    oom_markers = [
+        "out of memory",
+        "cuda out of memory",
+        "cublas_status_alloc_failed",
+        "cuda error",
+    ]
+    return any(marker in msg for marker in oom_markers)
+
+
+def _hard_truncate_prompt(tokenizer, prompt: str, max_tokens: int = 1024) -> str:
+    token_ids = tokenizer.encode(prompt)
+    if len(token_ids) <= max_tokens:
+        return prompt
+    return tokenizer.decode(token_ids[:max_tokens], skip_special_tokens=False)
+
+
 def load_existing_results(path: str):
     """
     Load existing result rows for checkpoint resume and full-run aggregation.
@@ -171,6 +189,7 @@ def main():
     results = list(existing_results)
     skipped_count = 0
     written_count = 0
+    error_count = 0
 
     results_dir = os.path.dirname(RESULTS_PATH) or "results"
     os.makedirs(results_dir, exist_ok=True)
@@ -253,97 +272,139 @@ def main():
                         continue
 
                     current_prompt = prompt
+                    orig_tokens = orig_prompt_tokens
+                    comp_tokens = orig_tokens
+                    compressed = bool(apply_compression)
 
-                    if apply_compression:
-                        current_prompt, _, comp_tokens, compressed = maybe_compress_prompt(prompt)
-                        orig_tokens=orig_prompt_tokens
-                    else:
-                        current_prompt=prompt
-                        orig_tokens=orig_prompt_tokens
-                        comp_tokens = orig_tokens
-                        compressed = False
+                    try:
+                        if apply_compression:
+                            current_prompt, _, comp_tokens, compressed = maybe_compress_prompt(prompt)
 
-                    # Generate answers
-                    responses = generate_answers(
-                        llm,
-                        tokenizer,
-                        current_prompt,
-                        num_return_sequences=SELF_CONSISTENCY_SAMPLES
-                    )
+                        # Generate answers
+                        try:
+                            responses = generate_answers(
+                                llm,
+                                tokenizer,
+                                current_prompt,
+                                num_return_sequences=SELF_CONSISTENCY_SAMPLES
+                            )
+                        except RuntimeError as gen_err:
+                            if not _is_oom_error(gen_err):
+                                raise
 
-                    main_answer = responses[0] if responses else ""
+                            clear_gpu()
+                            retry_prompt = _hard_truncate_prompt(tokenizer, current_prompt, max_tokens=1024)
+                            if retry_prompt == current_prompt:
+                                raise
 
-                    # Compute metrics
-                    em = exact_match(main_answer, gold)
-                    km = keyword_match_score(main_answer, gold)
-                    sc = self_consistency_score(responses, emb_model)
+                            current_prompt = retry_prompt
+                            comp_tokens = len(tokenizer(current_prompt).input_ids)
+                            print(
+                                "[WARN] OOM during generation. Retrying with hard-truncated prompt "
+                                f"({comp_tokens} tokens)."
+                            )
+                            responses = generate_answers(
+                                llm,
+                                tokenizer,
+                                current_prompt,
+                                num_return_sequences=SELF_CONSISTENCY_SAMPLES
+                            )
 
-                    premise = context if context.strip() else current_prompt
-                    
-                    # --------------------------------------------------
-                    # Truncate premise for NLI model (max ~512 tokens)
-                    # --------------------------------------------------
-                    #premise_tokens = nli_tokenizer.encode(premise)
+                        main_answer = responses[0] if responses else ""
 
-                    if nli_tokenizer is None:
-                        premise_tokens = []
-                    else:
-                        premise_tokens = nli_tokenizer.encode(premise)
+                        # Compute metrics
+                        em = exact_match(main_answer, gold)
+                        km = keyword_match_score(main_answer, gold)
+                        sc = self_consistency_score(responses, emb_model)
 
-                    if len(premise_tokens) > 400:
-                        premise_tokens = premise_tokens[:400]
-                        premise = nli_tokenizer.decode(premise_tokens)
+                        premise = context if context.strip() else current_prompt
 
-                    # --------------------------------------------------
+                        if nli_tokenizer is None:
+                            premise_tokens = []
+                        else:
+                            premise_tokens = nli_tokenizer.encode(premise)
 
-                    # nli_score = nli_support_score(
-                    #     nli_model,
-                    #     nli_tokenizer,
-                    #     premise,
-                    #     main_answer
-                    # )
-                    if nli_tokenizer is None or nli_model is None:
-                        nli_score = 0.0
-                    else:
-                        nli_score = nli_support_score(
-                            nli_model,
-                            nli_tokenizer,
-                            premise,
-                            main_answer
+                        if len(premise_tokens) > 400:
+                            premise_tokens = premise_tokens[:400]
+                            premise = nli_tokenizer.decode(premise_tokens)
+
+                        if nli_tokenizer is None or nli_model is None:
+                            nli_score = 0.0
+                        else:
+                            nli_score = nli_support_score(
+                                nli_model,
+                                nli_tokenizer,
+                                premise,
+                                main_answer
+                            )
+
+                        hallucination = float(nli_score < NLI_HALLUCINATION_THRESHOLD)
+
+                        row = {
+                            "id": sid,
+                            "dataset": dataset_name,
+                            "model_name": model_name,
+                            "compressed": int(compressed),
+                            "orig_tokens": orig_tokens,
+                            "compressed_tokens": comp_tokens,
+                            "prediction": main_answer,
+                            "exact_match": em,
+                            "keyword_match": km,
+                            "self_consistency": sc,
+                            "nli_support": nli_score,
+                            "hallucination": hallucination,
+                            "run_id": RUN_ID,
+                            "timestamp": TIMESTAMP,
+                        }
+
+                        writer.writerow(row)
+                        f.flush()
+                        checkpoint_keys.add(checkpoint)
+                        results.append(row)
+                        written_count += 1
+
+                        print(
+                            f"[{idx}/{len(samples)}] "
+                            f"{dataset_name} | "
+                            f"compressed={int(compressed)} | ",
+                            f"tokens={orig_tokens}->{comp_tokens} | ",
+                            f"EM={em:.1f} | SC={sc:.3f} | NLI={nli_score:.3f}"
                         )
 
+                    except Exception as err:
+                        error_count += 1
+                        clear_gpu()
 
-                    hallucination = float(nli_score < NLI_HALLUCINATION_THRESHOLD)
+                        # Persist a sentinel row so resume logic will not repeatedly re-hit
+                        # the same failing sample/mode across restarts.
+                        err_prediction = f"[SKIPPED_ERROR] {type(err).__name__}: {str(err)[:180]}"
+                        row = {
+                            "id": sid,
+                            "dataset": dataset_name,
+                            "model_name": model_name,
+                            "compressed": int(apply_compression),
+                            "orig_tokens": orig_tokens,
+                            "compressed_tokens": comp_tokens,
+                            "prediction": err_prediction,
+                            "exact_match": 0.0,
+                            "keyword_match": 0.0,
+                            "self_consistency": 0.0,
+                            "nli_support": 0.0,
+                            "hallucination": 1.0,
+                            "run_id": RUN_ID,
+                            "timestamp": TIMESTAMP,
+                        }
+                        writer.writerow(row)
+                        f.flush()
+                        checkpoint_keys.add(checkpoint)
+                        results.append(row)
+                        written_count += 1
 
-                    row = {
-                        "id": sid,
-                        "dataset": dataset_name,
-                        "model_name": model_name,
-                        "compressed": int(compressed),
-                        "orig_tokens": orig_tokens,
-                        "compressed_tokens": comp_tokens,
-                        "prediction": main_answer,
-                        "exact_match": em,
-                        "keyword_match": km,
-                        "self_consistency": sc,
-                        "nli_support": nli_score,
-                        "hallucination": hallucination,
-                        "run_id": RUN_ID,
-                        "timestamp": TIMESTAMP,
-                    }
-
-                    writer.writerow(row)
-                    checkpoint_keys.add(checkpoint)
-                    results.append(row)
-                    written_count += 1
-
-                    print(
-                        f"[{idx}/{len(samples)}] "
-                        f"{dataset_name} | "
-                        f"compressed={int(compressed)} | ",
-                        f"tokens={orig_tokens}->{comp_tokens} | ",
-                        f"EM={em:.1f} | SC={sc:.3f} | NLI={nli_score:.3f}"
-                    )
+                        print(
+                            f"[WARN] Skipping sample after error: id={sid} | dataset={dataset_name} "
+                            f"| model={model_name} | compressed={int(apply_compression)} | "
+                            f"error={type(err).__name__}: {err}"
+                        )
 
             # Free memory between model runs to avoid fragmentation/OOM when
             # running multiple large models sequentially in one process.
@@ -357,6 +418,7 @@ def main():
     print("\nComputing aggregated metrics...")
     print(f"[INFO] New rows written this run: {written_count}")
     print(f"[INFO] Rows skipped via checkpoint resume: {skipped_count}")
+    print(f"[INFO] Rows marked as skipped due to runtime errors: {error_count}")
 
     # ===============================
     # Delta Analysis (Compression Effect)
@@ -370,11 +432,12 @@ def main():
     sample_groups = defaultdict(list)
 
     for r in results:
-        sample_groups[r["id"]].append(r)
+        group_key = (r["id"], r["dataset"], r["model_name"])
+        sample_groups[group_key].append(r)
 
     delta_rows = []
 
-    for sid, rows in sample_groups.items():
+    for _, rows in sample_groups.items():
         if len(rows) != 2:
             continue  # skip if missing one mode
 

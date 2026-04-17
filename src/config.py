@@ -74,7 +74,8 @@ DATA_PATHS: List[str] = [
 ]
 
 # Path for results CSV output
-RESULTS_PATH: str = "results/experiment_results.csv"
+# Default points to the long-running file so checkpoint resume continues correctly.
+RESULTS_PATH: str = "results/experiment_results_final.csv"
 
 # ============================================================================
 # Generation Parameters
