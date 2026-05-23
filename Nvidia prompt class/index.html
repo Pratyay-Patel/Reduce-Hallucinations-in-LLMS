@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nvidia Prompt Classifier</title>
+    <style>
+        :root {
+            --primary-color: #76b900; /* Nvidia Green */
+            --bg-color: #1a1a1a;
+            --card-bg: #2d2d2d;
+            --text-color: #ffffff;
+            --secondary-text: #a0a0a0;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            min-height: 100vh;
+        }
+
+        .container {
+            width: 100%;
+            max-width: 800px;
+            padding: 2rem;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        h1 {
+            color: var(--primary-color);
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        p.subtitle {
+            color: var(--secondary-text);
+        }
+
+        .input-group {
+            background-color: var(--card-bg);
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            margin-bottom: 2rem;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 0.5rem;
+            font-weight: bold;
+        }
+
+        textarea {
+            width: 100%;
+            height: 150px;
+            padding: 1rem;
+            background-color: #3d3d3d;
+            border: 1px solid #4d4d4d;
+            border-radius: 4px;
+            color: var(--text-color);
+            font-size: 1rem;
+            resize: vertical;
+            box-sizing: border-box; /* Important for padding */
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+
+        button {
+            background-color: var(--primary-color);
+            color: #000;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            font-size: 1rem;
+            font-weight: bold;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-top: 1rem;
+            transition: background-color 0.2s;
+            width: 100%;
+        }
+
+        button:hover {
+            background-color: #8cd600;
+        }
+
+        button:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
+
+        #results {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+        }
+
+        .result-card {
+            background-color: var(--card-bg);
+            padding: 1.5rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        .result-card h3 {
+            margin-top: 0;
+            color: var(--primary-color);
+            font-size: 1.1rem;
+            border-bottom: 1px solid #444;
+            padding-bottom: 0.5rem;
+        }
+
+        .result-value {
+            font-size: 1.5rem;
+            font-weight: bold;
+            margin-top: 0.5rem;
+        }
+
+        .result-sub {
+            font-size: 0.9rem;
+            color: var(--secondary-text);
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        .loading {
+            text-align: center;
+            color: var(--secondary-text);
+            display: none;
+        }
+        
+        .error {
+            color: #ff4444;
+            background-color: rgba(255, 68, 68, 0.1);
+            padding: 1rem;
+            border-radius: 4px;
+            margin-top: 1rem;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h1>Prompt Analyzer</h1>
+        <p class="subtitle">Powered by Nvidia Prompt Task & Complexity Classifier</p>
+    </header>
+
+    <div class="input-group">
+        <label for="promptInput">Enter your prompt:</label>
+        <textarea id="promptInput" placeholder="Type your prompt here... (e.g., Write a Python script that uses a for loop)"></textarea>
+        <button id="analyzeBtn">Analyze Prompt</button>
+        <div id="errorMsg" class="error"></div>
+    </div>
+
+    <div id="loading" class="loading">Analyzing...</div>
+    <div id="results"></div>
+</div>
+
+<script>
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const promptInput = document.getElementById('promptInput');
+    const resultsDiv = document.getElementById('results');
+    const loadingDiv = document.getElementById('loading');
+    const errorMsg = document.getElementById('errorMsg');
+
+    analyzeBtn.addEventListener('click', async () => {
+        const prompt = promptInput.value.trim();
+        if (!prompt) {
+            showError("Please enter a prompt.");
+            return;
+        }
+
+        showError(""); // Clear error
+        resultsDiv.innerHTML = '';
+        loadingDiv.style.display = 'block';
+        analyzeBtn.disabled = true;
+
+        try {
+            const response = await fetch('/analyze', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ prompt: prompt }),
+            });
+
+            if (!response.ok) {
+                throw new Error(`Server error: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            displayResults(data);
+        } catch (error) {
+            showError(error.message);
+        } finally {
+            loadingDiv.style.display = 'none';
+            analyzeBtn.disabled = false;
+        }
+    });
+
+    function showError(msg) {
+        errorMsg.textContent = msg;
+        errorMsg.style.display = msg ? 'block' : 'none';
+    }
+
+    function displayResults(data) {
+        // Data format example:
+        // {'task_type_1': ['Code Generation'], 'task_type_2': ['Text Generation'], 'task_type_prob': [0.767], ...}
+        
+        // Helper to get value (handles lists if needed)
+        const getVal = (key) => {
+            const val = data[key];
+            return Array.isArray(val) ? val[0] : val;
+        };
+
+        const metrics = [
+            { key: 'task_type_1', label: 'Primary Task Type' },
+            { key: 'task_type_2', label: 'Secondary Task Type' },
+            { key: 'prompt_complexity_score', label: 'Complexity Score' },
+            { key: 'creativity_scope', label: 'Creativity Scope' },
+            { key: 'reasoning', label: 'Reasoning' },
+            { key: 'domain_knowledge', label: 'Domain Knowledge' },
+            { key: 'constraint_ct', label: 'Constraints' },
+            { key: 'contextual_knowledge', label: 'Contextual Knowledge' }
+        ];
+
+        metrics.forEach(metric => {
+            const val = getVal(metric.key);
+            if (val !== undefined && val !== null) {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+                
+                let displayVal = val;
+                if (typeof val === 'number') {
+                    displayVal = val.toFixed(4);
+                }
+
+                card.innerHTML = `
+                    <h3>${metric.label}</h3>
+                    <div class="result-value">${displayVal}</div>
+                `;
+                resultsDiv.appendChild(card);
+            }
+        });
+    }
+</script>
+
+</body>
+</html>

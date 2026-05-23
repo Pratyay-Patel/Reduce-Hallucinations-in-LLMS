@@ -1,0 +1,14 @@
+torch
+pandas
+numpy
+datasets
+transformers
+huggingface_hub
+evaluate
+rouge_score
+tqdm
+codecarbon
+llmlingua
+python-dotenv
+requests
+accelerate

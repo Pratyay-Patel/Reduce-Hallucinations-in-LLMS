@@ -1,0 +1,21 @@
+.env
+env/
+venv/
+Classification_model/venv/
+__pycache__/
+_pycache_/
+*.csv
+*.xlsx
+*.xls
+*.pkl
+eluetherai/
+data/
+datasets/
+datasetsave/
+Classification_model/Data/
+*.zip
+.DS_Store
+
+# Explicitly track classification model files
+!Classification_model/best_advanced_model.pkl
+!Classification_model/advanced_scaler.pkl

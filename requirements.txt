@@ -1,0 +1,14 @@
+torch
+pandas
+numpy
+datasets
+transformers
+evaluate
+tqdm
+codecarbon
+llmlingua
+python-dotenv
+accelerate
+sentencepiece
+protobuf
+requests
