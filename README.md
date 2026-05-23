@@ -105,6 +105,4 @@ Average pairwise cosine similarity between multiple generated answers. Higher sc
 ### NLI Support
 Probability that the context entails the generated answer using a Natural Language Inference model. Higher scores indicate the answer is better supported by the input context.
 
-## License
 
-[Add your license here]
