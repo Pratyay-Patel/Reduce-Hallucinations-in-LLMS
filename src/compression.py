@@ -6,7 +6,7 @@ track token counts, and manage the LLMLingua-2 compression model.
 """
 
 from typing import Tuple
-from src.config import COMPRESSION_THRESHOLD_TOKENS, LLMLINGUA_MODEL
+from src.config import COMPRESSION_THRESHOLD_TOKENS, LLMLINGUA_MODEL, DEVICE
 from src.config import FORCE_COMPRESSION
 
 # Global compressor instance
@@ -27,21 +27,18 @@ def init_compression(llm_tokenizer, llmlingua_model: str = LLMLINGUA_MODEL):
 
     # Lazy import to avoid heavy model loading at module import time
     from llmlingua import PromptCompressor
-    
+
     _llm_tokenizer = llm_tokenizer
 
-    # device_map="auto" allows compressor placement on available accelerators.
-    # If initialization fails, we disable compression instead of crashing runs.
-    try:
-        _compressor = PromptCompressor(
-            model_name=llmlingua_model,
-            use_llmlingua2=True,
-            device_map="auto"
-        )
-        print("[INFO] Prompt compression initialized.")
-    except Exception as err:
-        print(f"[WARN] Compression model failed ({err}); disabling compression.")
-        _compressor = None
+    # device_map="auto" (multi-GPU sharding) is unnecessary for this small
+    # BERT-base compressor and unsupported for its token-classification head
+    # on newer transformers versions. Target the actual device instead.
+    _compressor = PromptCompressor(
+        model_name=llmlingua_model,
+        use_llmlingua2=True,
+        device_map=DEVICE
+    )
+    print("[INFO] Prompt compression initialized.")
 
 
 def count_tokens(text: str) -> int:
