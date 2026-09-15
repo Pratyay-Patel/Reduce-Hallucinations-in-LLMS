@@ -6,6 +6,7 @@ scikit-learn==1.8.0
 xgboost==2.0.3
 scipy==1.13.1
 joblib==1.4.2
+shap>=0.44.0
 torch>=2.0.0
 transformers==4.45.2
 huggingface_hub
