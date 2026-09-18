@@ -10,6 +10,7 @@ import os
 import joblib
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from predict_nemo import FEATURE_COLS, predict_from_frame
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 BASE_DIR    = os.path.dirname(os.path.abspath(__file__))
@@ -28,8 +29,7 @@ df = df[df['dataset'].isin(TARGET_DATASETS)].reset_index(drop=True)
 print(f"  Rows after filtering to {TARGET_DATASETS}: {len(df)}")
 
 # ── Reproduce the exact train/test split on filtered data ─────────────────────
-FEATURES_TO_DROP = ['id', 'label', 'prompt_complexity_score', 'dataset']
-X = df.drop(columns=FEATURES_TO_DROP)
+X = df[FEATURE_COLS]
 y = df['label']
 
 _, X_test, _, y_test = train_test_split(
@@ -40,12 +40,10 @@ print(f"  Test split size: {len(X_test)} rows")
 # ── Load model & scaler ────────────────────────────────────────────────────────
 print("\nLoading model and scaler...")
 model  = joblib.load(MODEL_PATH)
-scaler = joblib.load(SCALER_PATH)
+scaler = joblib.load(SCALER_PATH) if os.path.exists(SCALER_PATH) else None
 
-# ── Scale & predict ────────────────────────────────────────────────────────────
 print("Running predictions on test split...")
-X_test_scaled = scaler.transform(X_test)
-predictions   = model.predict(X_test_scaled)
+predictions = predict_from_frame(X_test, model, scaler=scaler)
 
 # ── Results ────────────────────────────────────────────────────────────────────
 total      = len(predictions)

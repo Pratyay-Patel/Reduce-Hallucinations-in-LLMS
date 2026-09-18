@@ -1,6 +1,9 @@
 import os
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import argparse
+import math
+import subprocess
+import threading
 import torch
 import pandas as pd
 import numpy as np
@@ -33,7 +36,7 @@ _nemo_dir = os.path.join(_project_root, "Nvidia prompt class")
 if _nemo_dir not in sys.path:
     sys.path.insert(0, _nemo_dir)
 
-_classification_dir = os.path.join(_project_root, "classification_model")
+_classification_dir = os.path.join(_project_root, "Classification_model")
 if _classification_dir not in sys.path:
     sys.path.insert(0, _classification_dir)
 
@@ -72,98 +75,376 @@ def _empty_carbon_stats():
     }
 
 
+def _die_carbon(msg):
+    print(f"[Carbon] ERROR: {msg}")
+    sys.exit(1)
+
+
+def _require_finite(value, name, allow_zero=True):
+    """Reject missing/NaN measurements. Never substitute a fallback number."""
+    if value is None:
+        _die_carbon(f"{name} is missing. CodeCarbon is not tracking.")
+    try:
+        x = float(value)
+    except (TypeError, ValueError):
+        _die_carbon(f"{name} is not numeric ({value!r}). CodeCarbon is not tracking.")
+    if math.isnan(x) or math.isinf(x):
+        _die_carbon(f"{name} is {x}. CodeCarbon is not tracking.")
+    if not allow_zero and x <= 0:
+        _die_carbon(f"{name} is {x}. CodeCarbon did not record a real measurement.")
+    return round(x, 10)
+
+
+def _kwh_attr(obj):
+    if obj is None:
+        return None
+    return getattr(obj, "kWh", obj)
+
+
+def _field(ed, tracker, ed_key, tracker_attr=None):
+    if ed is not None:
+        v = getattr(ed, ed_key, None)
+        if v is not None:
+            return v
+    if tracker_attr:
+        return _kwh_attr(getattr(tracker, tracker_attr, None))
+    return None
+
+
+def _extract_tracker_stats(tracker, emissions_kg=None):
+    """Pull CO2 / energy / power fields. Abort if any required value is invalid."""
+    ed = getattr(tracker, "final_emissions_data", None)
+    if ed is None:
+        _die_carbon("CodeCarbon did not produce final_emissions_data.")
+
+    stats = _empty_carbon_stats()
+    stats["tracking_method"] = "codecarbon_batch"
+    stats["cpu_energy_kwh"] = _require_finite(
+        _field(ed, tracker, "cpu_energy", "_total_cpu_energy"), "cpu_energy", allow_zero=False
+    )
+    stats["gpu_energy_kwh"] = _require_finite(
+        _field(ed, tracker, "gpu_energy", "_total_gpu_energy"), "gpu_energy",
+        allow_zero=True,
+    )
+    stats["ram_energy_kwh"] = _require_finite(
+        _field(ed, tracker, "ram_energy", "_total_ram_energy"), "ram_energy", allow_zero=False
+    )
+    stats["energy_consumed_kwh"] = _require_finite(
+        _field(ed, tracker, "energy_consumed", "_total_energy"),
+        "energy_consumed",
+        allow_zero=False,
+    )
+    stats["cpu_power_w"] = _require_finite(_field(ed, tracker, "cpu_power"), "cpu_power", allow_zero=False)
+    stats["gpu_power_w"] = _require_finite(
+        _field(ed, tracker, "gpu_power"), "gpu_power", allow_zero=True
+    )
+    stats["ram_power_w"] = _require_finite(_field(ed, tracker, "ram_power"), "ram_power", allow_zero=False)
+    co2 = emissions_kg if emissions_kg is not None else getattr(ed, "emissions", None)
+    stats["emissions_kg_co2"] = _require_finite(co2, "emissions_kg_co2", allow_zero=False)
+    return stats
+
+
+# macOS sudo timestamps expire after ~5 minutes. CodeCarbon's background
+# `sudo powermetrics` does not reliably refresh that ticket, so GPU energy
+# becomes NaN on runs longer than the timeout.
+_sudo_keepalive_stop = None
+_sudo_keepalive_thread = None
+_sudo_keepalive_failed = False
+_SUDO_REFRESH_SECS = 4 * 60  # under macOS ~5 min sudo timeout; not per prompt
+
+
+def _sudo_refresh():
+    """Extend the sudo timestamp without prompting. Returns True on success."""
+    try:
+        return subprocess.run(["sudo", "-n", "-v"], capture_output=True).returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def _start_sudo_keepalive():
+    """Refresh sudo every 4 minutes so PowerMetrics does not die mid-run."""
+    global _sudo_keepalive_stop, _sudo_keepalive_thread, _sudo_keepalive_failed
+    if sys.platform != "darwin":
+        return
+    _sudo_keepalive_failed = False
+    _sudo_keepalive_stop = threading.Event()
+
+    def _loop():
+        global _sudo_keepalive_failed
+        while not _sudo_keepalive_stop.wait(_SUDO_REFRESH_SECS):
+            if _sudo_refresh():
+                print("[Carbon] sudo timestamp refreshed (every 4 min).")
+            else:
+                _sudo_keepalive_failed = True
+                print(
+                    "[Carbon] ERROR: sudo timestamp expired (macOS default ~5 min). "
+                    "PowerMetrics will return empty GPU/CPU samples."
+                )
+                return
+
+    _sudo_keepalive_thread = threading.Thread(
+        target=_loop, daemon=True, name="sudo-keepalive"
+    )
+    _sudo_keepalive_thread.start()
+    print("[Carbon] sudo keepalive started (refresh every 4 min).")
+
+
+def _stop_sudo_keepalive():
+    global _sudo_keepalive_stop, _sudo_keepalive_thread
+    if _sudo_keepalive_stop is not None:
+        _sudo_keepalive_stop.set()
+    _sudo_keepalive_thread = None
+    _sudo_keepalive_stop = None
+
+
+_POWERMETRICS_PATCHED = False
+
+
+def _finite_or_none(value):
+    v = _kwh_attr(value)
+    if v is None:
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(x) or math.isinf(x):
+        return None
+    return x
+
+
+def _patch_apple_powermetrics():
+    """
+    CodeCarbon uses np.mean([]) when a PowerMetrics sample has no GPU Power
+    line. That NaN is added into the running GPU/total energy and cannot be
+    recovered. Parse floats ourselves and never return NaN.
+    """
+    global _POWERMETRICS_PATCHED
+    if _POWERMETRICS_PATCHED or sys.platform != "darwin":
+        return
+    from codecarbon.core.powermetrics import ApplePowermetrics
+
+    def _log_values(self):
+        cmd = [
+            "sudo", "-n",
+            "powermetrics",
+            "-n", str(self._n_points),
+            "--samplers", "cpu_power",
+            "-i", str(self._interval),
+            "-o", self._log_file_path,
+        ]
+        rc = subprocess.call(cmd)
+        if rc != 0:
+            raise RuntimeError(f"powermetrics failed (exit {rc})")
+
+    def _mean_watts(logfile, label):
+        vals = [float(x) / 1000.0 for x in re.findall(rf"{label}: ([\d.]+) mW", logfile)]
+        if not vals:
+            return None
+        return float(sum(vals) / len(vals))
+
+    def get_details(self, delay=None):
+        last_err = None
+        for _ in range(3):
+            try:
+                self._log_values()
+                with open(self._log_file_path) as f:
+                    logfile = f.read()
+            except Exception as e:
+                last_err = e
+                time.sleep(0.15)
+                continue
+            cpu = _mean_watts(logfile, "CPU Power")
+            gpu = _mean_watts(logfile, "GPU Power")
+            if cpu is None:
+                last_err = RuntimeError("powermetrics log had no CPU Power lines")
+                time.sleep(0.15)
+                continue
+            if gpu is None:
+                gpu = 0.0
+            interval_s = float(self._interval) / 1000.0
+            n_cpu = max(len(re.findall(r"CPU Power: ([\d.]+) mW", logfile)), 1)
+            n_gpu = max(len(re.findall(r"GPU Power: ([\d.]+) mW", logfile)), 1)
+            return {
+                "CPU Power": cpu,
+                "GPU Power": gpu,
+                "CPU Energy Delta": interval_s * cpu * n_cpu,
+                "GPU Energy Delta": interval_s * gpu * n_gpu,
+            }
+        raise RuntimeError(f"powermetrics parse failed: {last_err}")
+
+    ApplePowermetrics._log_values = _log_values
+    ApplePowermetrics.get_details = get_details
+    _POWERMETRICS_PATCHED = True
+    print("[Carbon] Patched PowerMetrics parser so empty GPU samples are 0 W, not NaN.")
+
+
+def _guard_tracker_against_nan(tracker):
+    """If one background sample is still NaN, keep prior GPU/total energy."""
+    from codecarbon.core.units import Energy
+
+    orig = tracker._do_measurements
+
+    def wrapped():
+        gpu_before = _finite_or_none(getattr(tracker, "_total_gpu_energy", None))
+        energy_before = _finite_or_none(getattr(tracker, "_total_energy", None))
+        gpu_sum_before = getattr(tracker, "_gpu_power_sum", 0.0)
+        orig()
+        gpu_after = _finite_or_none(getattr(tracker, "_total_gpu_energy", None))
+        if gpu_after is None:
+            tracker._total_gpu_energy = Energy.from_energy(kWh=gpu_before or 0.0)
+            tracker._gpu_power_sum = gpu_sum_before
+            gpu_after = gpu_before or 0.0
+        cpu = _finite_or_none(getattr(tracker, "_total_cpu_energy", None)) or 0.0
+        ram = _finite_or_none(getattr(tracker, "_total_ram_energy", None)) or 0.0
+        total = _finite_or_none(getattr(tracker, "_total_energy", None))
+        if total is None:
+            tracker._total_energy = Energy.from_energy(
+                kWh=cpu + gpu_after + ram if energy_before is None else max(energy_before, cpu + gpu_after + ram)
+            )
+
+    tracker._do_measurements = wrapped
+
+
+def _enable_macos_powermetrics():
+    """CodeCarbon never prompts for sudo; without it it silently uses TDP. Refuse that."""
+    if sys.platform != "darwin":
+        return
+    print("[Carbon] Apple PowerMetrics requires sudo. CodeCarbon will not prompt on its own.")
+    if not sys.stdin.isatty():
+        _die_carbon(
+            "No interactive terminal for sudo. Run this script in a terminal and enter "
+            "your password so PowerMetrics can measure CPU/GPU. Refusing TDP fallback."
+        )
+    try:
+        rc = subprocess.run(["sudo", "-v"]).returncode
+    except FileNotFoundError:
+        _die_carbon("sudo not found. Cannot enable PowerMetrics.")
+    if rc != 0:
+        _die_carbon("sudo was not granted. Refusing to run with CodeCarbon TDP fallback.")
+    from codecarbon.core import powermetrics
+    if not powermetrics.is_powermetrics_available():
+        _die_carbon(
+            "PowerMetrics still unavailable after sudo. "
+            "CodeCarbon would fall back to TDP estimates. Stopping."
+        )
+    print("[Carbon] PowerMetrics sudo ok.")
+    _start_sudo_keepalive()
+
+
+def _assert_real_hardware_tracking(tracker):
+    """Abort if CodeCarbon selected TDP / CPU-load estimates instead of meters."""
+    from codecarbon.external.hardware import AppleSiliconChip, CPU, MODE_CPU_LOAD
+
+    hardware = list(getattr(tracker, "_hardware", None) or [])
+    summary = []
+    for h in hardware:
+        mode = getattr(h, "_mode", None)
+        part = getattr(h, "chip_part", None)
+        extra = mode or part or ""
+        summary.append(f"{type(h).__name__}:{extra}" if extra else type(h).__name__)
+    print(f"[Carbon] Hardware backends: {summary}")
+
+    fallback_cpus = [
+        h for h in hardware
+        if isinstance(h, CPU) and getattr(h, "_mode", None) in {MODE_CPU_LOAD, "constant"}
+    ]
+    if fallback_cpus:
+        modes = [h._mode for h in fallback_cpus]
+        _die_carbon(
+            f"CodeCarbon CPU backend is a fallback ({modes}), not RAPL/PowerMetrics. Stopping."
+        )
+
+    if sys.platform == "darwin":
+        parts = {h.chip_part for h in hardware if isinstance(h, AppleSiliconChip)}
+        if "CPU" not in parts or "GPU" not in parts:
+            _die_carbon(
+                f"Need Apple PowerMetrics CPU+GPU chips, got {parts or 'none'}. Stopping."
+            )
+
+
+def _assert_first_samples_finite(tracker):
+    """Catch NaN GPU/CPU energy before the experiment loop starts."""
+    try:
+        tracker._measure_power_and_energy()
+    except Exception as e:
+        _die_carbon(f"CodeCarbon first measurement failed ({e}). Stopping.")
+    for name, attr in (
+        ("cpu_energy", "_total_cpu_energy"),
+        ("gpu_energy", "_total_gpu_energy"),
+        ("energy_consumed", "_total_energy"),
+    ):
+        _require_finite(_kwh_attr(getattr(tracker, attr, None)), f"first sample {name}")
+
+
+def start_batch_tracker():
+    """Start a single CodeCarbon tracker. Exit if real metering is not active."""
+    _enable_macos_powermetrics()
+    _patch_apple_powermetrics()
+    try:
+        tracker = EmissionsTracker(
+            project_name="ecoprompt_batch",
+            measure_power_secs=1,
+            save_to_file=False,
+            log_level="warning",
+            allow_multiple_runs=True,
+        )
+    except Exception as e:
+        _die_carbon(f"Tracker init failed ({e}).")
+    _assert_real_hardware_tracking(tracker)
+    try:
+        tracker.start()
+    except Exception as e:
+        _die_carbon(f"Tracker start failed ({e}).")
+    _guard_tracker_against_nan(tracker)
+    time.sleep(1.2)
+    _assert_first_samples_finite(tracker)
+    print("[Carbon] Batch tracker started with real PowerMetrics/RAPL metering.")
+    return tracker
+
+
+def stop_batch_tracker(tracker):
+    """Stop the run-level tracker. Exit if CO2/energy were not actually measured."""
+    _stop_sudo_keepalive()
+    if tracker is None:
+        _die_carbon("CodeCarbon tracker was never started.")
+    if _sudo_keepalive_failed:
+        _die_carbon(
+            "sudo expired before CodeCarbon stopped, so GPU/CPU energy became NaN. "
+            "Re-run in this terminal; sudo is refreshed every 4 min."
+        )
+    try:
+        emissions_kg = tracker.stop()
+    except Exception as e:
+        _die_carbon(f"Tracker stop failed ({e}).")
+    stats = _extract_tracker_stats(tracker, emissions_kg)
+    print(
+        f"[Carbon] Batch tracker stopped | "
+        f"CO2={stats['emissions_kg_co2']:.6f} kg | "
+        f"Energy={stats['energy_consumed_kwh']:.6f} kWh"
+    )
+    return stats
+
+
 def track_generation(generate_fn, no_tracking=False):
     """
-    Wraps a zero-argument callable `generate_fn` with CodeCarbon tracking.
-
-    Usage:
-        output, carbon = track_generation(lambda: model_manager.generate(tier, user, sys))
+    Time a single generation call. CodeCarbon is owned by the batch tracker
+    (start/stop once per run), not per prompt.
 
     Returns
     -------
-    output : str   — whatever generate_fn() returns
-    stats  : dict  — carbon / energy metrics (safe to write to CSV)
+    output : str
+    stats  : dict  — gen_duration_s filled now; CO2/energy filled after batch stop
     """
-    if no_tracking:
-        t0 = time.time()
-        try:
-            output = generate_fn()
-        except Exception as e:
-            output = f"Error: {e}"
-        stats = _empty_carbon_stats()
-        stats["gen_duration_s"]  = round(time.time() - t0, 4)
-        stats["tracking_method"] = "disabled"
-        return output, stats
-
-    tracker = None
-    output  = "Error"
     t0 = time.time()
-
-    try:
-        tracker = EmissionsTracker(
-            project_name="ecoprompt_per_prompt",
-            measure_power_secs=1,
-            save_to_file=False,
-            log_level="error",
-            allow_multiple_runs=True,
-        )
-        tracker.start()
-    except Exception as e:
-        print(f"[Carbon] Tracker init failed ({e}). Terminating script.")
-        sys.exit(1)
-
     try:
         output = generate_fn()
     except Exception as e:
         print(f"[Carbon] Generation error: {e}")
         output = f"Error: {e}"
-
-    t1 = time.time()
-    gen_duration = round(t1 - t0, 4)
-
-    emissions_kg = 0.0
     stats = _empty_carbon_stats()
-    stats["gen_duration_s"] = gen_duration
-
-    if tracker is not None:
-        try:
-            emissions_kg = tracker.stop() or 0.0
-            stats["emissions_kg_co2"] = round(float(emissions_kg), 10)
-            stats["tracking_method"]  = "codecarbon"
-
-            ed = getattr(tracker, "final_emissions_data", None) \
-              or getattr(tracker, "_emissions",            None) \
-              or getattr(tracker, "final_emissions",       None)
-
-            if ed is not None:
-                def _g(obj, *keys):
-                    for k in keys:
-                        v = getattr(obj, k, None)
-                        if v is not None:
-                            try:
-                                return round(float(v), 10)
-                            except (TypeError, ValueError):
-                                pass
-                    return 0.0
-
-                stats["energy_consumed_kwh"] = _g(ed, "energy_consumed")
-                stats["cpu_power_w"]         = _g(ed, "cpu_power")
-                stats["gpu_power_w"]         = _g(ed, "gpu_power")
-                stats["ram_power_w"]         = _g(ed, "ram_power")
-                stats["cpu_energy_kwh"]      = _g(ed, "cpu_energy")
-                stats["gpu_energy_kwh"]      = _g(ed, "gpu_energy")
-                stats["ram_energy_kwh"]      = _g(ed, "ram_energy")
-            else:
-                stats["tracking_method"] = "codecarbon_co2_only"
-
-        except Exception as e:
-            print(f"[Carbon] Tracker stop/extract failed ({e}), using fallback.")
-            stats["tracking_method"] = "wallclock_fallback"
-            try:
-                tracker.stop()
-            except Exception:
-                pass
-
+    stats["gen_duration_s"] = round(time.time() - t0, 4)
+    stats["tracking_method"] = "disabled" if no_tracking else "codecarbon_batch"
     return output, stats
 
 
@@ -255,6 +536,25 @@ def build_prompt(item, ds_name, subset):
         user = (
             f"Question: {item['question']}\n"
             "Solution:"
+        )
+        return user, system, ref
+
+    # ── AI2 ARC ───────────────────────────────────────────────────────────
+    elif ds_name == "allenai/ai2_arc" and subset in ("ARC-Easy", "ARC-Challenge"):
+        ref = item["answerKey"]
+        system = (
+            "You are a science question answering assistant. "
+            "Respond with only the option identifier exactly as it appears in the choices. "
+            "The identifier may be A, B, C, D or 1, 2, 3, 4. "
+            "Do not explain your answer."
+        )
+        labels = item["choices"]["label"]
+        texts  = item["choices"]["text"]
+        choice_lines = "\n".join(f"{lab}. {txt}" for lab, txt in zip(labels, texts))
+        user = (
+            f"Question: {item['question']}\n\n"
+            f"Choices:\n{choice_lines}\n\n"
+            "Answer:"
         )
         return user, system, ref
 
@@ -507,8 +807,8 @@ class IntelligenceEngine:
                 num_tokens = features["num_tokens"]
 
                 # Now use predict_label
-                scaler_path = os.path.join(_project_root, "classification_model", 'advanced_scaler.pkl')
-                model_path = os.path.join(_project_root, "classification_model", 'best_advanced_model.pkl')
+                scaler_path = os.path.join(_classification_dir, 'advanced_scaler.pkl')
+                model_path = os.path.join(_classification_dir, 'best_advanced_model.pkl')
 
                 label_int = predict_nemo.predict_label(
                     nemo_raw_output_json=nemo_raw_json, 
@@ -568,6 +868,8 @@ class DatasetLoader:
             ("squad_v2",     None):    (os.path.join(self.data_root, "data", "SQuAD_v2"),      "validation"),
             ("cnn_dailymail","3.0.0"): (os.path.join(self.data_root, "data", "CNN_DailyMail"), "test"),
             ("gsm8k",        "main"):  (os.path.join(self.data_root, "data", "GSM8K"),         "train"),
+            ("allenai/ai2_arc", "ARC-Easy"):      (os.path.join(self.data_root, "data", "ARC_Easy"),      "validation"),
+            ("allenai/ai2_arc", "ARC-Challenge"): (os.path.join(self.data_root, "data", "ARC_Challenge"), "validation"),
         }
         return paths.get((ds_name, subset))
 
@@ -612,6 +914,8 @@ class Evaluator:
             return Evaluator.rouge(output, reference), "ROUGE-L"
         elif ds_name == "gsm8k":
             return Evaluator.gsm8k(output, reference), "EM"
+        elif ds_name == "allenai/ai2_arc":
+            return Evaluator.arc(output, reference), "accuracy"
         return 0.0, "unknown"
 
     @staticmethod
@@ -703,6 +1007,16 @@ class Evaluator:
         except ValueError:
             return 0
 
+    @staticmethod
+    def arc(pred, answer_key):
+        """Exact multiple-choice accuracy over A-D / 1-4 option identifiers."""
+        gold = str(answer_key).strip().upper()
+        pred = str(pred).upper()
+        match = re.search(r"\b([A-D]|[1-4])\b", pred)
+        if not match:
+            return 0
+        return 1 if match.group(1) == gold else 0
+
 
 # ---------------------------------------------------------------------------
 # ExperimentRunner
@@ -716,6 +1030,9 @@ class ExperimentRunner:
         self.results         = []
         self.csv_initialized = False
         self.interrupted     = False
+        self.batch_tracker   = None
+        self.batch_totals    = _empty_carbon_stats()
+        self._carbon_stopped = False
 
         # S1  Upper Bound      – always tier3 (Phi-3 Mini),       no compression
         # S2  Lower Bound      – always tier1 (Llama 3.2 1B),     no compression
@@ -737,9 +1054,123 @@ class ExperimentRunner:
     def _signal_handler(self, signum, frame):
         print("\n\n⚠️  Process interrupted! Saving results before exit...")
         self.interrupted = True
+        self._finalize_batch_carbon()
         self._save_results()
         print("✅ Results saved. Exiting gracefully.")
         sys.exit(0)
+
+    def _preload_models(self, active_scenarios):
+        """
+        Load (and warm up) models before CodeCarbon starts so the first
+        real prompts are not charged for download/weight-load time.
+        """
+        print("[INFO] Preloading models before carbon tracking...")
+        # classify_complexity always runs, even for non-routing scenarios
+        self.mm.get_nemo_model()
+
+        # Match real SST-2 / ARC chat length. A 2-token "ok" warmup does not
+        # compile MPS/CUDA kernels for the ~70–90 token templates used later,
+        # so the first real prompts still pay first-shape compile time.
+        warmup_system = (
+            "You are a sentiment classifier. "
+            "Reply with exactly one word: positive or negative. Nothing else."
+        )
+        warmup_user = (
+            "Sentence: a thoughtful character study whose performances and "
+            "pacing hold together even when the plot turns familiar and "
+            "the ending feels a little too neat for its own good\n"
+            "Sentiment:"
+        )
+        warmup_rounds = 3
+
+        need_t1 = any(sc.get("routing") or sc.get("fixed") == "tier1" for sc in active_scenarios)
+        need_t3 = any(sc.get("routing") or sc.get("fixed") == "tier3" for sc in active_scenarios)
+        if need_t1:
+            self.mm.load_tier1()
+            print(f"[INFO] Warmup generate (tier1) x{warmup_rounds}...")
+            for _ in range(warmup_rounds):
+                self.mm.generate("tier1", warmup_user, warmup_system)
+        if need_t3:
+            self.mm.load_tier3()
+            print(f"[INFO] Warmup generate (tier3) x{warmup_rounds}...")
+            for _ in range(warmup_rounds):
+                self.mm.generate("tier3", warmup_user, warmup_system)
+        if any(sc.get("compression") for sc in active_scenarios):
+            self.ie.get_compressor()
+        print("[INFO] Models ready. Starting carbon tracker.")
+
+    def _start_batch_tracker(self):
+        if getattr(self.args, "no_tracking", False):
+            print("[Carbon] Tracking disabled (--no_tracking).")
+            return
+        self.batch_tracker = start_batch_tracker()
+
+    def _finalize_batch_carbon(self):
+        """Stop the run-level tracker once and allocate totals across prompts."""
+        if self._carbon_stopped:
+            return
+        self._carbon_stopped = True
+        if getattr(self.args, "no_tracking", False):
+            return
+        if self.batch_tracker is None:
+            print("[Carbon] Tracker was not started; not writing carbon columns.")
+            return
+        self.batch_totals = stop_batch_tracker(self.batch_tracker)
+        self.batch_tracker = None
+        self._allocate_batch_carbon()
+        self._rewrite_carbon_columns()
+
+    def _allocate_batch_carbon(self):
+        """Split batch CO2/energy across rows in proportion to generation duration."""
+        if not self.results:
+            return
+        totals = self.batch_totals
+        total_dur = sum(float(r.get("gen_duration_s") or 0.0) for r in self.results)
+        energy_keys = (
+            "emissions_kg_co2",
+            "energy_consumed_kwh",
+            "cpu_energy_kwh",
+            "gpu_energy_kwh",
+            "ram_energy_kwh",
+        )
+        power_keys = ("cpu_power_w", "gpu_power_w", "ram_power_w")
+        method = totals.get("tracking_method") or "codecarbon_batch"
+        for row in self.results:
+            dur = float(row.get("gen_duration_s") or 0.0)
+            frac = (dur / total_dur) if total_dur > 0 else 0.0
+            for k in energy_keys:
+                row[k] = round(_require_finite(totals.get(k), k) * frac, 10)
+            for k in power_keys:
+                row[k] = _require_finite(totals.get(k), k, allow_zero=(k == "gpu_power_w"))
+            row["tracking_method"] = method
+
+    def _rewrite_carbon_columns(self):
+        """Patch carbon fields on this run's rows in the output CSV (resume-safe)."""
+        path = getattr(self.args, "output_csv", None)
+        if not path or not os.path.exists(path) or not self.results:
+            return
+        carbon_cols = [
+            "emissions_kg_co2", "energy_consumed_kwh", "gen_duration_s",
+            "cpu_power_w", "gpu_power_w", "ram_power_w",
+            "cpu_energy_kwh", "gpu_energy_kwh", "ram_energy_kwh",
+            "tracking_method",
+        ]
+        key = ["scenario_id", "dataset", "sample_index", "timestamp"]
+        try:
+            df = pd.read_csv(path)
+            updates = pd.DataFrame(self.results)
+            if df.empty or updates.empty:
+                return
+            df["_k"] = df[key].astype(str).agg("|".join, axis=1)
+            updates["_k"] = updates[key].astype(str).agg("|".join, axis=1)
+            upd_map = updates.set_index("_k")[carbon_cols]
+            mask = df["_k"].isin(upd_map.index)
+            for col in carbon_cols:
+                df.loc[mask, col] = df.loc[mask, "_k"].map(upd_map[col])
+            df.drop(columns=["_k"]).to_csv(path, index=False)
+            print(f"[Carbon] Wrote allocated batch metrics into {path}")
+        except Exception as e:
+            print(f"[Carbon] Could not patch CSV carbon columns ({e}).")
 
     def run(self):
         all_dsets = [
@@ -748,6 +1179,8 @@ class ExperimentRunner:
             ("squad_v2",     None,    "validation"),
             ("cnn_dailymail","3.0.0", "test"),
             ("gsm8k",        "main",  "train"),
+            ("allenai/ai2_arc", "ARC-Easy",      "validation"),
+            ("allenai/ai2_arc", "ARC-Challenge", "validation"),
         ]
 
         target_dsets = []
@@ -765,32 +1198,35 @@ class ExperimentRunner:
             active_scenarios = [s for s in self.scenarios if s["id"] in self.args.scenarios]
 
         loader = DatasetLoader(self.data_root)
-
-        for ds_name, subset, split in target_dsets:
-            if self.interrupted:
-                break
-
-            print(f"\ndataset: {ds_name} ({subset or ''})")
-            
-            start_idx = getattr(self.args, 'start_index', 0)
-            data = loader.load(ds_name, subset, split, self.args.samples, start_idx)
-            if not data:
-                continue
-
-            for i, item in enumerate(tqdm(data), start=start_idx):
+        self._preload_models(active_scenarios)
+        self._start_batch_tracker()
+        try:
+            for ds_name, subset, split in target_dsets:
                 if self.interrupted:
                     break
 
-                # Classify using only the user content (no system prompt noise)
-                plain_user, _, _ = build_prompt(item, ds_name, subset)
-                category, nemo_result = self.ie.classify_complexity(plain_user)
+                print(f"\ndataset: {ds_name} ({subset or ''})")
 
-                for sc in active_scenarios:
+                start_idx = getattr(self.args, 'start_index', 0)
+                data = loader.load(ds_name, subset, split, self.args.samples, start_idx)
+                if not data:
+                    continue
+
+                for i, item in enumerate(tqdm(data), start=start_idx):
                     if self.interrupted:
                         break
-                    self._run_scenario(sc, i, item, ds_name, subset, category, nemo_result)
 
-        self._save_results()
+                    # Classify using only the user content (no system prompt noise)
+                    plain_user, _, _ = build_prompt(item, ds_name, subset)
+                    category, nemo_result = self.ie.classify_complexity(plain_user)
+
+                    for sc in active_scenarios:
+                        if self.interrupted:
+                            break
+                        self._run_scenario(sc, i, item, ds_name, subset, category, nemo_result)
+        finally:
+            self._finalize_batch_carbon()
+            self._save_results()
 
     def _run_scenario(self, sc, idx, item, ds_name, subset, category, nemo_result):
         # 1. Determine tier
@@ -830,18 +1266,15 @@ class ExperimentRunner:
             print(datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         print(
             f"[Carbon] {carbon['tracking_method']} | "
-            f"CO2={carbon['emissions_kg_co2']:.6f} kg | "
-            f"Energy={carbon['energy_consumed_kwh']:.6f} kWh | "
-            f"Duration={carbon['gen_duration_s']:.2f}s"
+            f"Duration={carbon['gen_duration_s']:.2f}s "
+            f"(batch CO2/energy assigned at end of run)"
         )
 
         # 5. Score
         score  = 0.0
         stype  = "acc"
-        ds_raw = display_name.split("/")[0]
-        sub    = display_name.split("/")[1] if "/" in display_name else None
         if not output.startswith("Error"):
-            score, stype = Evaluator.evaluate(output, ref, ds_raw, sub)
+            score, stype = Evaluator.evaluate(output, ref, ds_name, subset)
 
         # 6. Record
         nemo_str = json.dumps(nemo_result) if nemo_result else "{}"
@@ -927,6 +1360,13 @@ class ExperimentRunner:
             return
         df = pd.DataFrame(self.results)
         print(f"\nMain results already saved to {self.args.output_csv}")
+        if not getattr(self.args, "no_tracking", False):
+            t = self.batch_totals
+            print(
+                f"[Carbon] Batch totals | CO2={t.get('emissions_kg_co2', 0):.6f} kg | "
+                f"Energy={t.get('energy_consumed_kwh', 0):.6f} kWh | "
+                f"method={t.get('tracking_method')}"
+            )
 
         summary = df.groupby(["scenario_id", "scenario_name", "dataset"])["accuracy_score"].mean().reset_index()
         summary_path = self.args.output_csv.replace(".csv", "_summary.csv")

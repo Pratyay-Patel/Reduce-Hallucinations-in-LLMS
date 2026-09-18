@@ -14,6 +14,9 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, f1_score
+from sklearn.pipeline import Pipeline
+
+from predict_nemo import FEATURE_COLS, predict_from_frame
 
 warnings.filterwarnings("ignore")
 
@@ -23,13 +26,18 @@ DATA_PATH   = os.path.join(BASE_DIR, "finalllama.csv")
 MODEL_PATH  = os.path.join(BASE_DIR, "best_advanced_model.pkl")
 SCALER_PATH = os.path.join(BASE_DIR, "advanced_scaler.pkl")
 
-FEATURES_TO_DROP = ['id', 'label', 'prompt_complexity_score', 'dataset']
+# Same datasets and feature order as train_advanced.ipynb
+TRAIN_DATASETS = ['glue/sst2', 'gsm8k/main', 'allenai/ai2_arc/ARC-Easy','allenai/ai2_arc/ARC-Challenge']
 
 # ── Load data ──────────────────────────────────────────────────────────────────
 print("Loading dataset...")
 df = pd.read_csv(DATA_PATH)
+print(f"  Rows in CSV (all datasets): {len(df)}")
+df = df[df['dataset'].isin(TRAIN_DATASETS)].reset_index(drop=True)
+print(f"  Rows after filter {TRAIN_DATASETS}: {len(df)}")
+print(df['dataset'].value_counts().to_string(), "\n")
 
-X = df.drop(columns=FEATURES_TO_DROP)
+X = df[FEATURE_COLS]
 y = df['label']
 datasets_col = df['dataset']  # keep for grouping later
 
@@ -43,12 +51,18 @@ print(f"  Test split size: {len(X_test)} rows\n")
 # ── Load model & scaler ────────────────────────────────────────────────────────
 print("Loading model and scaler...")
 model  = joblib.load(MODEL_PATH)
-scaler = joblib.load(SCALER_PATH)
+scaler = joblib.load(SCALER_PATH) if os.path.exists(SCALER_PATH) else None
+print(f"  Model type          : {type(model).__name__}")
+if isinstance(model, Pipeline):
+    print(f"  Pipeline steps      : {list(model.named_steps)}")
+    print(f"  Raw n_features_in_  : {model.n_features_in_}")
+else:
+    print(f"  Scaler n_features   : {getattr(scaler, 'n_features_in_', None)}")
+    print(f"  Model  n_features   : {getattr(model, 'n_features_in_', 'unknown')}")
 
 # ── Predict ────────────────────────────────────────────────────────────────────
 print("Running predictions...")
-X_test_scaled = scaler.transform(X_test)
-preds = model.predict(X_test_scaled)
+preds = predict_from_frame(X_test, model, scaler=scaler)
 
 # Build a results DataFrame for easy slicing
 results_df = pd.DataFrame({

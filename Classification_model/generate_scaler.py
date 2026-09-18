@@ -4,10 +4,16 @@ from sklearn.preprocessing import StandardScaler
 import joblib
 
 print("Loading finalllama.csv to generate scaler...")
+print("NOTE: Prefer saving scaler from train_advanced.ipynb. The inference")
+print("Pipeline in best_advanced_model.pkl already includes the scaler.")
 df = pd.read_csv('finalllama.csv')
 
 # Exact filters from train_advanced.ipynb
-df = df[(df['dataset'] == 'glue/sst2') | (df['dataset'] == 'gsm8k/main')]
+df = df[
+    (df['dataset'] == 'glue/sst2')
+    | (df['dataset'] == 'gsm8k/main')
+    | (df['dataset'] == 'allenai/ai2_arc/ARC-Easy')
+]
 df_processed = df.copy()
 
 features_to_drop = ['id', 'label', 'prompt_complexity_score', 'dataset']

@@ -2,7 +2,7 @@ import pandas as pd
 import json
 
 print("Reading Llama3.1acc_dataset.csv...")
-df = pd.read_csv('Llama3.1acc_dataset.csv')
+df = pd.read_csv('Classification_model/arc_llama_200.csv')
 
 def parse_nemo(row):
     try:
@@ -29,7 +29,7 @@ if 'accuracy_score' in df.columns:
 if 'sample_index' in df.columns:
     df = df.rename(columns={'sample_index': 'id'})
 
-print("Saving to finalllama.csv...")
-df.to_csv('finalllama.csv', index=False)
+print("Saving to final_arc_llama_200...")
+df.to_csv('final_arc_llama_200.csv', index=False)
 print("Done! Here are the new columns:")
 print(df.columns.tolist())
