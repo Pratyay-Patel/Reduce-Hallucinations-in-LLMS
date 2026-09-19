@@ -539,6 +539,21 @@ def build_prompt(item, ds_name, subset):
         )
         return user, system, ref
 
+    # ── BoolQ ─────────────────────────────────────────────────────────────
+    elif ds_name == "boolq":
+        ref    = item["answer"]
+        system = (
+            "You are a Boolean question answering assistant. "
+            "Read the passage and answer the question using exactly one word: yes or no. "
+            "Do not explain your answer."
+        )
+        user = (
+            f"Passage: {item['passage']}\n\n"
+            f"Question: {item['question']}\n\n"
+            "Answer:"
+        )
+        return user, system, ref
+
     # ── AI2 ARC ───────────────────────────────────────────────────────────
     elif ds_name == "allenai/ai2_arc" and subset in ("ARC-Easy", "ARC-Challenge"):
         ref = item["answerKey"]
@@ -868,6 +883,7 @@ class DatasetLoader:
             ("squad_v2",     None):    (os.path.join(self.data_root, "data", "SQuAD_v2"),      "validation"),
             ("cnn_dailymail","3.0.0"): (os.path.join(self.data_root, "data", "CNN_DailyMail"), "test"),
             ("gsm8k",        "main"):  (os.path.join(self.data_root, "data", "GSM8K"),         "train"),
+            ("boolq",        None):    (os.path.join(self.data_root, "data", "BoolQ"),         "validation"),
             ("allenai/ai2_arc", "ARC-Easy"):      (os.path.join(self.data_root, "data", "ARC_Easy"),      "validation"),
             ("allenai/ai2_arc", "ARC-Challenge"): (os.path.join(self.data_root, "data", "ARC_Challenge"), "validation"),
         }
@@ -914,6 +930,8 @@ class Evaluator:
             return Evaluator.rouge(output, reference), "ROUGE-L"
         elif ds_name == "gsm8k":
             return Evaluator.gsm8k(output, reference), "EM"
+        elif ds_name == "boolq":
+            return Evaluator.boolq(output, reference), "accuracy"
         elif ds_name == "allenai/ai2_arc":
             return Evaluator.arc(output, reference), "accuracy"
         return 0.0, "unknown"
@@ -1006,6 +1024,27 @@ class Evaluator:
             return 1 if abs(pred_val - gold) < 1e-5 else 0
         except ValueError:
             return 0
+
+    @staticmethod
+    def boolq(pred, label):
+        """First whole-word mention of yes/no wins (word-bounded so 'not'/'know' don't count as 'no')."""
+        pred = pred.lower()
+        if isinstance(label, str):
+            lbl = "yes" if label.strip().lower() in ("yes", "true", "1") else "no"
+        else:
+            lbl = "yes" if label else "no"
+
+        yes_m = re.search(r"\byes\b", pred)
+        no_m  = re.search(r"\bno\b", pred)
+        if not yes_m and not no_m:
+            return 0
+        if not yes_m:
+            p = "no"
+        elif not no_m:
+            p = "yes"
+        else:
+            p = "yes" if yes_m.start() < no_m.start() else "no"
+        return 1 if p == lbl else 0
 
     @staticmethod
     def arc(pred, answer_key):
@@ -1179,6 +1218,7 @@ class ExperimentRunner:
             ("squad_v2",     None,    "validation"),
             ("cnn_dailymail","3.0.0", "test"),
             ("gsm8k",        "main",  "train"),
+            ("boolq",        None,    "validation"),
             ("allenai/ai2_arc", "ARC-Easy",      "validation"),
             ("allenai/ai2_arc", "ARC-Challenge", "validation"),
         ]
