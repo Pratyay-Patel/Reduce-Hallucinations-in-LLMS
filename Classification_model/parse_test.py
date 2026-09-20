@@ -1,35 +1,51 @@
 import pandas as pd
 import json
 
-print("Reading Llama3.1acc_dataset.csv...")
-df = pd.read_csv('Classification_model/arc_llama_200.csv')
+REFERENCE_CSV = 'Classification_model/finalllama.csv'
+INPUT_CSV     = 'results/boolqllama_pq.csv'
+OUTPUT_CSV    = 'Classification_model/final_data/final_bool_llama_pq.csv'
 
+# ── Derive target columns from reference file ─────────────────────────────────
+print(f"Reading reference columns from {REFERENCE_CSV} …")
+TARGET_COLUMNS = pd.read_csv(REFERENCE_CSV, nrows=0).columns.tolist()
+print(f"Target columns: {TARGET_COLUMNS}")
+
+# ── Parse a single nemo_raw_output cell ───────────────────────────────────────
 def parse_nemo(row):
     try:
-        if pd.isna(row): return {}
-        if isinstance(row, str):
-            # Sometimes json format might need strict double quotes, assuming it's valid JSON
-            data = json.loads(row)
-        else:
-            data = row
-        return {k: v[0] if isinstance(v, list) and len(v) > 0 else v for k, v in data.items()}
-    except Exception as e:
+        if pd.isna(row):
+            return {}
+        data = json.loads(row) if isinstance(row, str) else row
+        # Unwrap single-element lists produced by NeMo Curator
+        return {k: v[0] if isinstance(v, list) and len(v) > 0 else v
+                for k, v in data.items()}
+    except Exception:
         return {}
 
-print("Parsing nemo_raw_output...")
-# We use apply to get dictionaries, then convert directly to DataFrame for performance
-parsed_dicts = df['nemo_raw_output'].apply(parse_nemo).tolist()
-parsed_df = pd.DataFrame(parsed_dicts)
+print(f"Reading {INPUT_CSV} …")
+df = pd.read_csv(INPUT_CSV)
 
-print("Concatenating parsed columns with original data...")
-df = pd.concat([df.drop(columns=['nemo_raw_output', 'nemo_raw_output.1'], errors='ignore'), parsed_df], axis=1)
+print("Parsing nemo_raw_output …")
+parsed_df = pd.DataFrame(df['nemo_raw_output'].apply(parse_nemo).tolist())
 
-if 'accuracy_score' in df.columns:
-    df = df.rename(columns={'accuracy_score': 'label'})
-if 'sample_index' in df.columns:
-    df = df.rename(columns={'sample_index': 'id'})
+print("Expanding NeMo columns into main DataFrame …")
+df = pd.concat(
+    [df.drop(columns=['nemo_raw_output', 'nemo_raw_output.1'], errors='ignore'),
+     parsed_df],
+    axis=1,
+)
 
-print("Saving to final_arc_llama_200...")
-df.to_csv('final_arc_llama_200.csv', index=False)
-print("Done! Here are the new columns:")
+# ── Rename to match target schema ─────────────────────────────────────────────
+df = df.rename(columns={
+    'accuracy_score': 'label',
+    'sample_index':   'id',
+})
+
+# ── Keep only reference columns (in the same order), skip any missing ones ────
+present = [c for c in TARGET_COLUMNS if c in df.columns]
+df = df[present]
+
+print(f"Saving to {OUTPUT_CSV} …")
+df.to_csv(OUTPUT_CSV, index=False)
+print("Done! Columns in output:")
 print(df.columns.tolist())
