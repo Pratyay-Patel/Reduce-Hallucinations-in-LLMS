@@ -590,6 +590,20 @@ def build_prompt(item, ds_name, subset):
         )
         return user, system, ref
 
+    # ── AG News ───────────────────────────────────────────────────────────
+    elif ds_name == "ag_news":
+        ref    = item["label"]
+        system = (
+            "You are a news topic classifier. "
+            "Your reply must be exactly one of: World, Sports, Business, Sci/Tech. "
+            "No explanation, no punctuation, no extra text."
+        )
+        user = (
+            f"Article: {item['text']}\n\n"
+            "Category:"
+        )
+        return user, system, ref
+
     # ── fallback ──────────────────────────────────────────────────────────
     return str(item), "", ""
 
@@ -904,6 +918,7 @@ class DatasetLoader:
             ("allenai/ai2_arc", "ARC-Easy"):      (os.path.join(self.data_root, "data", "ARC_Easy"),      "validation"),
             ("allenai/ai2_arc", "ARC-Challenge"): (os.path.join(self.data_root, "data", "ARC_Challenge"), "validation"),
             ("piqa",         None):    (os.path.join(self.data_root, "data", "PIQA"),          "validation"),
+            ("ag_news",      None):    (os.path.join(self.data_root, "data", "AG_News"),       "test"),
         }
         return paths.get((ds_name, subset))
 
@@ -954,6 +969,8 @@ class Evaluator:
             return Evaluator.arc(output, reference), "accuracy"
         elif ds_name == "piqa":
             return Evaluator.piqa(output, reference), "accuracy"
+        elif ds_name == "ag_news":
+            return Evaluator.ag_news(output, reference), "accuracy"
         return 0.0, "unknown"
 
     @staticmethod
@@ -1084,6 +1101,30 @@ class Evaluator:
         if not match:
             return 0
         return 1 if match.group(1) == gold else 0
+
+    @staticmethod
+    def ag_news(pred, label):
+        """Find the first valid category word anywhere in the output."""
+        pred = pred.lower()
+        map_ = {0: "world", 1: "sports", 2: "business", 3: "sci/tech"}
+        lbl  = map_.get(label, "") if isinstance(label, int) else str(label).lower()
+
+        # 'tech' occurs inside other words, so these are regexes not str.find
+        patterns = {
+            "world":    r"\bworld\b",
+            "sports":   r"\bsports?\b",
+            "business": r"\bbusiness\b",
+            "sci/tech": r"\b(?:sci/tech|sci-tech|tech\b|technolog\w*|scien\w*|computer\w*)",
+        }
+        positions = {}
+        for name, pat in patterns.items():
+            m = re.search(pat, pred)
+            if m:
+                positions[name] = m.start()
+        if not positions:
+            return 0
+        p = min(positions, key=positions.get)
+        return 1 if p == lbl else 0
 
 
 # ---------------------------------------------------------------------------
@@ -1251,6 +1292,7 @@ class ExperimentRunner:
             ("allenai/ai2_arc", "ARC-Easy",      "validation"),
             ("allenai/ai2_arc", "ARC-Challenge", "validation"),
             ("piqa",         None,    "validation"),
+            ("ag_news",      None,    "test"),
         ]
 
         target_dsets = []
