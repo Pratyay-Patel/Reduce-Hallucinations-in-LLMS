@@ -573,6 +573,23 @@ def build_prompt(item, ds_name, subset):
         )
         return user, system, ref
 
+    # ── PIQA ──────────────────────────────────────────────────────────────
+    elif ds_name == "piqa":
+        ref    = item["label"]
+        system = (
+            "You are a physical commonsense reasoning assistant. "
+            "Choose the solution that better achieves the goal. "
+            "Reply with only the solution number, 1 or 2. "
+            "Do not explain your answer."
+        )
+        user = (
+            f"Goal: {item['goal']}\n\n"
+            f"Solution 1: {item['sol1']}\n\n"
+            f"Solution 2: {item['sol2']}\n\n"
+            "Answer:"
+        )
+        return user, system, ref
+
     # ── fallback ──────────────────────────────────────────────────────────
     return str(item), "", ""
 
@@ -886,6 +903,7 @@ class DatasetLoader:
             ("boolq",        None):    (os.path.join(self.data_root, "data", "BoolQ"),         "validation"),
             ("allenai/ai2_arc", "ARC-Easy"):      (os.path.join(self.data_root, "data", "ARC_Easy"),      "validation"),
             ("allenai/ai2_arc", "ARC-Challenge"): (os.path.join(self.data_root, "data", "ARC_Challenge"), "validation"),
+            ("piqa",         None):    (os.path.join(self.data_root, "data", "PIQA"),          "validation"),
         }
         return paths.get((ds_name, subset))
 
@@ -934,6 +952,8 @@ class Evaluator:
             return Evaluator.boolq(output, reference), "accuracy"
         elif ds_name == "allenai/ai2_arc":
             return Evaluator.arc(output, reference), "accuracy"
+        elif ds_name == "piqa":
+            return Evaluator.piqa(output, reference), "accuracy"
         return 0.0, "unknown"
 
     @staticmethod
@@ -1052,6 +1072,15 @@ class Evaluator:
         gold = str(answer_key).strip().upper()
         pred = str(pred).upper()
         match = re.search(r"\b([A-D]|[1-4])\b", pred)
+        if not match:
+            return 0
+        return 1 if match.group(1) == gold else 0
+
+    @staticmethod
+    def piqa(pred, label):
+        """Exact two-way accuracy over solution identifiers 1 / 2."""
+        gold = str(label + 1) if isinstance(label, int) else str(label).strip()
+        match = re.search(r"\b([12])\b", str(pred))
         if not match:
             return 0
         return 1 if match.group(1) == gold else 0
@@ -1221,6 +1250,7 @@ class ExperimentRunner:
             ("boolq",        None,    "validation"),
             ("allenai/ai2_arc", "ARC-Easy",      "validation"),
             ("allenai/ai2_arc", "ARC-Challenge", "validation"),
+            ("piqa",         None,    "validation"),
         ]
 
         target_dsets = []
