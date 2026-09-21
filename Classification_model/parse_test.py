@@ -2,8 +2,8 @@ import pandas as pd
 import json
 
 REFERENCE_CSV = 'Classification_model/finalllama.csv'
-INPUT_CSV     = 'results/boolqllama_pq.csv'
-OUTPUT_CSV    = 'Classification_model/final_data/final_bool_llama_pq.csv'
+INPUT_CSV     = 'results/ag_news_llama_all.csv'
+OUTPUT_CSV    = 'Classification_model/final_data/final_ag_news_llama_all.csv'
 
 # ── Derive target columns from reference file ─────────────────────────────────
 print(f"Reading reference columns from {REFERENCE_CSV} …")
