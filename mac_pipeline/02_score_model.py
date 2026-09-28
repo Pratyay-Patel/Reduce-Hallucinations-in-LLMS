@@ -83,6 +83,7 @@ def main():
                                  gold=int(r["gold"]), pred=s["pred"], pred_letter=s["pred_letter"],
                                  correct=s["correct"], graded=s["graded"], p_gold=s["p_gold"],
                                  logprobs=json.dumps(s["logprobs"]), prompt_tokens=s["prompt_tokens"],
+                                 rendered_prompt=s["rendered_prompt"],
                                  seconds=s["seconds"], peak_mem_gb=s["peak_mem_gb"],
                                  energy_kwh_attr=np.nan, run_id=None, repeat=args.repeat))
                 if (k + 1) % 100 == 0:

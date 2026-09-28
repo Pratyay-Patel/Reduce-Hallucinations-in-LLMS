@@ -20,7 +20,9 @@ from common.data import LETTERS, format_prompt
 
 class OptionScorer:
     def __init__(self, model_id: str, device: str, chat_template: bool = False,
-                 max_length: int = 768):
+                 max_length: int = 1024):
+        # 1024 > the longest prompt (641 Qwen tokens for MMLU) plus any chat wrapper, so the
+        # left-truncation in _option_logprob never fires on this question bank
         self.model_id = model_id
         self.device = device
         self.chat_template = chat_template
@@ -94,6 +96,9 @@ class OptionScorer:
             graded=float(probs[pred]), p_gold=float(probs[gold]),
             logprobs=[round(x, 5) for x in lps],
             prompt_tokens=int(prompt_ids.shape[1]),
+            # exact text the model saw (chat wrapper and special tokens included); the scored
+            # option letter is appended after this
+            rendered_prompt=self.tok.decode(prompt_ids[0], skip_special_tokens=False),
             seconds=time.perf_counter() - t0,
             peak_mem_gb=self.peak_mem_gb(),
         )
