@@ -85,7 +85,8 @@ def model_checks(roles):
     from common.scorer import OptionScorer
     dev = config.pick_device()
     q = load_questions()
-    sub = subset(q[q["dataset"] == "mmlu"], config.SANITY_N)
+    # train rows only: the prompt-format choice must not look at test questions
+    sub = subset(q[(q["dataset"] == "mmlu") & (q["fold"] == "train")], config.SANITY_N)
     print(f"\nsanity subset: {len(sub)} MMLU questions spread across the 20 subjects")
     print(f"{'role':<10}{'format':<10}{'acc':>7}{'published':>11}{'s/q':>7}{'peak GB':>9}")
     for role in roles:
