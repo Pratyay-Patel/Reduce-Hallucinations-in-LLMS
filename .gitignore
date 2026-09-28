@@ -19,3 +19,6 @@ Classification_model/Data/
 # Explicitly track classification model files
 !Classification_model/best_advanced_model.pkl
 !Classification_model/advanced_scaler.pkl
+
+# Fixed question bank for the Mac pipeline (seeded; keep identical across machines)
+!mac_pipeline/questions/*.csv
