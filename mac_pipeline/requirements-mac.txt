@@ -1,0 +1,15 @@
+# Apple Silicon (M-series) -- install into a fresh venv:
+#   python3 -m venv .venv && source .venv/bin/activate && pip install -r mac_pipeline/requirements-mac.txt
+torch>=2.4            # MPS backend; the default PyPI wheel on macOS arm64 has it
+transformers>=4.45
+accelerate
+datasets>=2.20
+sentence-transformers>=3.0
+scikit-learn>=1.5
+scipy
+pandas
+numpy
+matplotlib
+openpyxl
+codecarbon>=3.0       # reads sudo powermetrics on Apple Silicon
+huggingface_hub
