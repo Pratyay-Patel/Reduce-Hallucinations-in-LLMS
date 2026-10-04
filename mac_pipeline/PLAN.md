@@ -274,6 +274,10 @@ Everything after step 3 is re-runnable from the CSVs without touching a model.
 
 ## 7. How to run on the Mac
 
+Unattended: `bash mac_pipeline/run_all.sh` runs everything below in order with cooldowns,
+logs to `mac_pipeline/logs/`, keeps the Mac awake, and notifies when done. `MODE=minimal`
+scores only what Results_Run1 lacks; `resume` skips finished steps. The manual sequence:
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r mac_pipeline/requirements-mac.txt
