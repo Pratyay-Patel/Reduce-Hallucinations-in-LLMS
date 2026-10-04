@@ -77,6 +77,9 @@ COUNTRY = "IND"                           # ISO-3; change to where the Mac actua
 CARBON_INTENSITY_G_PER_KWH = None         # set a number to force the factor the paper states
 MEASURE_POWER_SECS = 1
 IDLE_SECS = 60
+# On the Mac, refuse to run any tracked step unless powermetrics is delivering SoC samples.
+# CodeCarbon's fallback is an 85 W-TDP model, which is not a measurement.
+REQUIRE_POWERMETRICS = True
 ROUTER_EMBEDDER = "sentence-transformers/all-MiniLM-L6-v2"
 
 # ----------------------------------------------------------------------------- routing

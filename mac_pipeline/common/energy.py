@@ -63,6 +63,25 @@ def powermetrics_available() -> bool:
         return False
 
 
+def codecarbon_hardware(tracker) -> dict:
+    """Which hardware trackers CodeCarbon instantiated, and whether its CPU figure is a model.
+    `CPU(mode=cpu_load|constant|windows_emi, tdp=85, generic=True)` means an 85 W-TDP estimate;
+    `AppleSiliconChip(CPU)` would mean powermetrics."""
+    items, cpu_is_model = [], False
+    for h in getattr(tracker, "_hardware", []):
+        name = type(h).__name__
+        mode = getattr(h, "_mode", None)
+        tdp = getattr(h, "_tdp", None)
+        generic = getattr(h, "_is_generic_tdp", None)
+        part = getattr(h, "chip_part", None)
+        desc = name + (f"({part})" if part else "") + \
+            (f"[mode={mode}, tdp={tdp} W, generic_tdp={generic}]" if mode else "")
+        items.append(desc)
+        if name == "CPU" and mode in ("cpu_load", "constant", "windows_emi", "intel_power_gadget"):
+            cpu_is_model = mode in ("cpu_load", "constant")
+    return {"trackers": items, "cpu_is_tdp_model": cpu_is_model}
+
+
 def _data_to_dict(d) -> dict:
     keys = ["run_id", "duration", "emissions", "cpu_power", "gpu_power", "ram_power",
             "cpu_energy", "gpu_energy", "ram_energy", "energy_consumed", "country_iso_code",
@@ -174,6 +193,12 @@ def tracked(project_name: str):
     run = {"project": project_name, "t0": time.perf_counter()}
     t.start()
     pm.start()
+    strict = IS_MAC and getattr(config, "REQUIRE_POWERMETRICS", True)
+    if strict and not pm.active:
+        t.stop()
+        raise RuntimeError("powermetrics is not delivering power samples (sudo -n powermetrics failed). "
+                           "Refusing to run: CodeCarbon's fallback is an 85 W-TDP model, not a measurement. "
+                           "Fix sudoers (see PLAN.md §2) and rerun.")
     try:
         yield run
     finally:
@@ -181,6 +206,10 @@ def tracked(project_name: str):
         t.stop()
         run["wall_s"] = time.perf_counter() - run["t0"]
         run["data"] = _data_to_dict(t.final_emissions_data)
+        run["cc_hardware"] = codecarbon_hardware(t)
+        if strict and not (run["soc"].get("soc_samples") or 0):
+            raise RuntimeError(f"powermetrics produced no samples during '{project_name}' "
+                               f"({run['wall_s']:.0f}s). The run's energy would be CodeCarbon's TDP model. Aborting.")
         try:
             # the gCO2e/kWh CodeCarbon applied for config.COUNTRY, read directly (after stop(),
             # when its Emissions object exists) so it does not depend on which energy terms
@@ -302,15 +331,25 @@ def check_measurement(seconds: int = 30) -> dict:
     """Run the tracker on a small GPU load and report what was actually measured."""
     import torch
     dev = config.pick_device()
-    with tracked("check_measurement") as run:
-        x = torch.randn(1024, 1024, device=dev)
-        t0 = time.perf_counter()
-        while time.perf_counter() - t0 < seconds:
-            x = (x @ x).clamp(-1, 1)
-        if dev == "mps":
-            torch.mps.synchronize()
+    run = {}
+    try:
+        with tracked("check_measurement") as run:
+            x = torch.randn(1024, 1024, device=dev)
+            t0 = time.perf_counter()
+            while time.perf_counter() - t0 < seconds:
+                x = (x @ x).clamp(-1, 1)
+            if dev == "mps":
+                torch.mps.synchronize()
+    except RuntimeError as e:
+        # strict mode refused: report it instead of crashing the check script
+        return dict(device=dev, powermetrics=powermetrics_available(), error=str(e), ok_soc=False,
+                    ok_cpu=False, ok_gpu=False, soc_kwh=None, soc_mean_w=None, soc_samples=0,
+                    soc_cpu_kwh=None, soc_gpu_kwh=None, cc_cpu_kwh=None, cc_gpu_kwh=None, cc_ram_kwh=None,
+                    cc_total_kwh=None, cc_cpu_w=None, cc_gpu_w=None, carbon_factor=None,
+                    cc_hardware=run.get("cc_hardware", {}), codecarbon_version=None)
     d, soc = run["data"], run["soc"]
-    return dict(device=dev, powermetrics=powermetrics_available(),
+    return dict(device=dev, powermetrics=powermetrics_available(), error=None,
+                cc_hardware=run.get("cc_hardware", {}),
                 soc_kwh=soc["soc_kwh"], soc_mean_w=soc["soc_mean_w"], soc_samples=soc["soc_samples"],
                 soc_cpu_kwh=soc["soc_cpu_kwh"], soc_gpu_kwh=soc["soc_gpu_kwh"],
                 cc_cpu_kwh=d["cpu_energy"], cc_gpu_kwh=d["gpu_energy"], cc_ram_kwh=d["ram_energy"],

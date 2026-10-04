@@ -60,6 +60,18 @@ step() {
   fi
 }
 
+# verify a step's outputs (files present, row counts right, energy from powermetrics)
+check() {
+  local name="$1"; shift
+  if "$PYTHON" mac_pipeline/check_outputs.py "$@" >"$LOGS/check_${name}_$STAMP.log" 2>&1; then
+    log "check $name ok"; return 0
+  else
+    log "CHECK FAILED $name -- see $LOGS/check_${name}_$STAMP.log"
+    grep -A20 "CHECK FAILED" "$LOGS/check_${name}_$STAMP.log" | sed 's/^/        /' | tee -a "$MAIN"
+    return 1
+  fi
+}
+
 cooldown() {
   [[ "$COOLDOWN" -gt 0 ]] || return 0
   log "cooldown ${COOLDOWN}s"
@@ -102,6 +114,7 @@ EOF
 
 # question bank (idempotent: keeps existing folds)
 step 01_build_questions "$PYTHON" mac_pipeline/01_build_questions.py || fail_hard "question bank"
+check 01_build_questions questions || fail_hard "question bank outputs"
 
 # environment + energy check + prompt-format choice (writes config_overrides.json)
 if [[ "$MODE" == "full" ]]; then
@@ -116,12 +129,14 @@ if [[ "$MODE" == "full" ]]; then
   for role in "${ROLES[@]}"; do
     step "02_score_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset "${DATASETS[@]}" \
       || fail_hard "scoring $role"
+    check "02_score_$role" scores --role "$role" --datasets "${DATASETS[@]}" || fail_hard "scores for $role incomplete"
     cooldown
   done
   for k in $(seq 1 "$REPEATS"); do
     for role in "${ROLES[@]}"; do
       step "02_repeat${k}_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset mmlu --limit 200 --repeat "$k" \
         || log "repeat $k for $role failed; continuing"
+      check "02_repeat${k}_$role" scores --role "$role" --datasets mmlu --repeat "$k" --limit 200 || log "repeat $k for $role incomplete; continuing"
       cooldown
     done
   done
@@ -132,17 +147,26 @@ else
     [[ -f "mac_pipeline/scores/$role.csv" ]] || fail_hard "minimal mode needs mac_pipeline/scores/$role.csv from Results_Run1"
     step "02_score_${role}_csqa" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset csqa \
       || fail_hard "scoring $role csqa"
+    check "02_score_${role}_csqa" scores --role "$role" --datasets csqa || fail_hard "csqa scores for $role incomplete"
     cooldown
   done
   step "02_score_llama3b_csqa_arc" "$PYTHON" mac_pipeline/02_score_model.py --role llama3b --dataset csqa arc \
     || fail_hard "scoring llama3b"
+  check "02_score_llama3b_csqa_arc" scores --role llama3b --datasets csqa arc || fail_hard "llama3b scores incomplete"
+  # every role must now cover every dataset before the analysis steps
+  for role in "${ROLES[@]}"; do
+    check "02_coverage_$role" scores --role "$role" --datasets "${DATASETS[@]}" || fail_hard "$role does not cover every dataset"
+  done
   cooldown
 fi
 
 # ------------------------------------------------------------------ analysis (seconds)
 step 03_gate         "$PYTHON" mac_pipeline/03_gate.py         || fail_hard "gate"
+check 03_gate gate                                              || fail_hard "gate outputs"
 step 04_train_router "$PYTHON" mac_pipeline/04_train_router.py || fail_hard "router"
+check 04_train_router router                                    || fail_hard "router outputs"
 step 05_simulate     "$PYTHON" mac_pipeline/05_simulate.py     || fail_hard "simulate"
+check 05_simulate simulate                                      || fail_hard "simulate outputs"
 
 # ------------------------------------------------------------------ end-to-end (measured)
 # every configuration, so the paper can pick: hybrid, each plain cascade, the base alone,
@@ -151,14 +175,18 @@ E2E=(hybrid)
 for p in "${POOL[@]}"; do E2E+=("cascade:$p"); done
 E2E+=(base)
 for p in "${POOL[@]}"; do E2E+=("single:$p"); done
+TAU_STAR="$("$PYTHON" -c "import json;print(f\"{json.load(open('mac_pipeline/router/thresholds.json'))['tau_star']:.2f}\")")"
 for cfg in "${E2E[@]}"; do
   name="06_e2e_${cfg//:/-}"
-  step "$name" "$PYTHON" mac_pipeline/06_run_end_to_end.py --config "$cfg" || log "end-to-end $cfg failed; continuing"
+  case "$cfg" in base) tau="0.00";; single:*) tau="1.01";; *) tau="$TAU_STAR";; esac
+  step "$name" "$PYTHON" mac_pipeline/06_run_end_to_end.py --config "$cfg" || { log "end-to-end $cfg failed; continuing"; cooldown; continue; }
+  check "$name" e2e --name "${cfg//:/-}_$tau" || log "end-to-end $cfg outputs incomplete; continuing"
   cooldown
 done
 
 # ------------------------------------------------------------------ report
 step 07_report "$PYTHON" mac_pipeline/07_report.py || log "report failed"
+check 07_report report || log "report outputs incomplete"
 
 # ------------------------------------------------------------------ summary
 log "finished. results in mac_pipeline/results/ (report.md, results.xlsx); logs in $LOGS"
