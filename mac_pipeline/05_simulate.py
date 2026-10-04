@@ -32,13 +32,15 @@ import pandas as pd
 from common import energy
 from common.data import load_questions, load_scores, pivot_scores
 
-# gCO2e per kWh used to convert attributed kWh into emissions, taken from the base run
+# gCO2e per kWh used to convert attributed kWh into emissions: the factor CodeCarbon applied
+# for the configured country, recovered from any scoring run's summary
 def carbon_factor(scores_roles):
     for r in scores_roles:
         for ds in config.DATASETS:
             s = energy.load_summary(f"{r}_{ds}_r0")
-            if s and s.get("carbon_intensity_g_per_kwh"):
-                return s["carbon_intensity_g_per_kwh"]
+            f = energy.factor_of(s) if s else None
+            if f:
+                return f
     return np.nan
 
 
@@ -86,7 +88,7 @@ def main():
     conf = piv[("graded", base)].values
     gfac = carbon_factor(roles)
     rt = energy.load_summary("router_embed")
-    router_kwh_q = rt["kwh_per_question"] if rt else 0.0
+    router_kwh_q = (energy.record_kwh(rt) / rt["n"]) if rt and rt.get("n") else 0.0
     if not rt:
         print("WARNING: no router_embed energy summary; router overhead charged as 0")
 

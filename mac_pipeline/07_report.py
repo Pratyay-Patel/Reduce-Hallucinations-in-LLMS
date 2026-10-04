@@ -40,21 +40,24 @@ def table1():
         for ds in config.DATASETS:
             d[f"acc_{ds}"] = s[s.dataset == ds].correct.mean()
         # energy from the full (train+test) runs, per 1,000 questions
-        tot_kwh, tot_g, tot_s, tot_n, pm = 0.0, 0.0, 0.0, 0, None
+        tot_kwh, tot_cc, tot_g, tot_s, tot_n, pm, src = 0.0, 0.0, 0.0, 0.0, 0, None, set()
         for ds in config.DATASETS:
             e = energy.load_summary(f"{r}_{ds}_r0")
             if e:
-                tot_kwh += e["total_kwh"]; tot_g += e["gco2e"]; tot_s += e["duration_s"]; tot_n += e["n"]
+                tot_kwh += energy.record_kwh(e); tot_cc += e.get("total_kwh") or 0.0
+                tot_g += energy.emissions_g(e) or 0.0; tot_s += e["duration_s"]; tot_n += e["n"]
                 pm = e.get("powermetrics")
+                src.add("powermetrics SoC" if e.get("soc_kwh") is not None else "CodeCarbon model")
         if tot_n:
-            d.update(wh_per_1000=tot_kwh / tot_n * 1e6, gco2e_per_1000=tot_g / tot_n * 1000,
+            d.update(wh_per_1000=tot_kwh / tot_n * 1e6, codecarbon_wh_per_1000=tot_cc / tot_n * 1e6,
+                     gco2e_per_1000=tot_g / tot_n * 1000,
                      s_per_1000=tot_s / tot_n * 1000, mean_w=tot_kwh * 3.6e6 / tot_s if tot_s else np.nan,
-                     powermetrics=pm)
+                     energy_source="/".join(sorted(src)), powermetrics=pm)
         # +- from repeats on the sanity subset
         reps = [energy.load_summary(os.path.basename(p)[:-5])
                 for p in glob.glob(str(config.ENERGY_DIR / f"{r}_mmlu_r[1-9].json"))]
         if reps:
-            v = [x["total_kwh"] / x["n"] * 1e6 for x in reps]
+            v = [energy.record_kwh(x) / x["n"] * 1e6 for x in reps]
             d.update(wh_per_1000_repeat_mean=np.mean(v), wh_per_1000_repeat_sd=np.std(v, ddof=1) if len(v) > 1 else np.nan,
                      n_repeats=len(v))
         d["peak_mem_gb"] = s.peak_mem_gb.max()
@@ -71,13 +74,31 @@ def table2():
         ["A", "B", "n_A_wrong", "B_right_on_A_wrong", "rate", "chance", "headroom_pts", "p_value", "passes"]]
 
 
+def global_factor():
+    """Carbon factor from any scoring-run summary (old end-to-end JSONs lack the fields)."""
+    for r in config.ALL_ROLES:
+        for ds in config.DATASETS:
+            e = energy.load_summary(f"{r}_{ds}_r0")
+            f = energy.factor_of(e) if e else None
+            if f:
+                return f
+    return np.nan
+
+
 def table3():
     rows = []
+    gf = global_factor()
     for p in sorted(glob.glob(str(config.RESULTS_DIR / "end_to_end_*.json"))):
         j = json.loads(open(p).read())
+        # recompute energy of record and emissions from the passes, so old JSONs (written
+        # before the emissions fix) are reported consistently with new ones
+        passes = j.get("per_pass", {})
+        kwh = sum((v.get("record_kwh") if v.get("record_kwh") is not None else energy.record_kwh(v))
+                  for v in passes.values() if v) if passes else j["total_kwh"]
         d = dict(config=j["config"], tau=j["tau"], n=j["n"], acc=j["accuracy"],
-                 escalated=j["escalation_rate"], wh_per_1000=j["wh_per_1000"], gco2e_per_q=j["gco2e_per_q"],
-                 total_kwh=j["total_kwh"], wall_min=j["wall_s"] / 60)
+                 escalated=j["escalation_rate"], wh_per_1000=kwh / j["n"] * 1e6,
+                 gco2e_per_q=(kwh * gf / j["n"]) if gf == gf else np.nan,
+                 total_kwh=kwh, wall_min=j["wall_s"] / 60)
         for ds, v in j["per_dataset"].items():
             d[f"acc_{ds}"] = v["acc"]
         rows.append(d)

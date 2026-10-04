@@ -47,9 +47,10 @@ def embed_all(q: pd.DataFrame, track: bool):
                 texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
         summ = energy.summarize_run(run, role="router", model_id=config.ROUTER_EMBEDDER,
                                     dataset="all", repeat=0, n=len(texts), idle=idle)
-        summ["kwh_per_question"] = summ["total_kwh"] / len(texts)
+        rec = energy.record_kwh(summ)
+        summ["kwh_per_question"] = rec / len(texts)
         energy.write_summary(summ, "router_embed")
-        print(f"embedding energy: {summ['total_kwh'] * 1000:.4f} Wh for {len(texts)} q  "
+        print(f"embedding energy: {rec * 1000:.4f} Wh for {len(texts)} q  "
               f"({summ['kwh_per_question'] * 3.6e6:.3f} J/q)")
     else:
         E = SentenceTransformer(config.ROUTER_EMBEDDER).encode(

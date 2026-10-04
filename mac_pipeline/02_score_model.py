@@ -101,12 +101,14 @@ def main():
                                                    peak_mem_gb=float(df["peak_mem_gb"].max()),
                                                    limit=args.limit))
             energy.write_summary(summ, tag)
-            df["energy_kwh_attr"] = energy.attribute(summ["total_kwh"], df["seconds"])
+            rec = energy.record_kwh(summ)
+            df["energy_kwh_attr"] = energy.attribute(rec, df["seconds"])
             df["run_id"] = summ["run_id"]
+            src = "powermetrics SoC" if summ.get("soc_kwh") is not None else "CodeCarbon (no powermetrics!)"
             print(f"  {ds}: n={len(df)} acc={df['correct'].mean():.3f}  "
-                  f"{summ['total_kwh'] * 1000:.3f} Wh  {summ['gco2e']:.2f} gCO2e  "
+                  f"{rec * 1000:.3f} Wh [{src}]  {summ['gco2e'] or 0:.2f} gCO2e  "
                   f"mean {summ['mean_w'] or 0:.1f} W  idle {idle.get('idle_w') or 0:.1f} W  "
-                  f"powermetrics={summ['powermetrics']}")
+                  f"CodeCarbon {summ['total_kwh'] * 1000:.3f} Wh")
         else:
             print(f"  {ds}: n={len(df)} acc={df['correct'].mean():.3f}  (energy not tracked)")
         chance = (1.0 / df["n_options"]).mean()

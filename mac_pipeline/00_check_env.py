@@ -66,16 +66,20 @@ def env_checks():
 def energy_check():
     from common import energy
     r = energy.check_measurement(30)
-    print(f"tracked 30 s load on {r['device']}: cpu {r['cpu_w'] or 0:.1f} W  gpu {r['gpu_w'] or 0:.1f} W  "
-          f"total {(r['total_kwh'] or 0) * 1000:.3f} Wh   powermetrics={r['powermetrics']}")
-    ok = r["ok_cpu"]
+    print(f"tracked 30 s load on {r['device']}:")
+    print(f"  powermetrics SoC: {(r['soc_kwh'] or 0) * 1000:.3f} Wh, mean {r['soc_mean_w'] or 0:.1f} W, "
+          f"{r['soc_samples']} samples   (energy of record on the Mac)")
+    print(f"  CodeCarbon:       {(r['cc_total_kwh'] or 0) * 1000:.3f} Wh  cpu {r['cc_cpu_w'] or 0:.1f} W "
+          f"(85 W-TDP load model, not measured)  gpu {r['cc_gpu_w'] or 0:.1f} W   "
+          f"carbon factor {r['carbon_factor'] or 0:.0f} gCO2e/kWh")
     if platform.system() == "Darwin":
-        ok = ok and r["ok_gpu"] and r["powermetrics"]
+        ok = r["ok_soc"] and r["powermetrics"]
         if not ok:
-            print("  FAIL: energy is not being measured (zero GPU energy or powermetrics inactive).\n"
-                  "        CodeCarbon is falling back to a TDP constant. Fix sudoers before scoring.")
+            print("  FAIL: powermetrics did not deliver SoC power samples. Without it there is no\n"
+                  "        measurement, only CodeCarbon's TDP model. Fix sudoers before scoring.")
     else:
-        print("  (not a Mac: powermetrics path not applicable; CPU energy may be a TDP estimate)")
+        ok = r["ok_cpu"]
+        print("  (not a Mac: powermetrics path not applicable; CPU energy is a TDP estimate)")
     return ok
 
 

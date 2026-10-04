@@ -64,7 +64,7 @@ def run_model(role, sub: pd.DataFrame, tag: str, device, no_energy: bool, idle_s
         summ = energy.summarize_run(run, role=role, model_id=m["id"], dataset="e2e", repeat=0,
                                     n=len(df), idle=idle, extra=dict(tag=tag))
         energy.write_summary(summ, tag)
-        df["kwh_attr"] = energy.attribute(summ["total_kwh"], df["seconds"])
+        df["kwh_attr"] = energy.attribute(energy.record_kwh(summ), df["seconds"])
     else:
         df["kwh_attr"] = 0.0
     time.sleep(3)
@@ -158,7 +158,7 @@ def main():
                                           dataset="e2e", repeat=0, n=len(esc), idle={})
                 energy.write_summary(rs, f"e2e_{name}_router")
                 passes["router"] = rs
-                log.loc[esc.index, "router_kwh_attr"] = rs["total_kwh"] / len(esc)
+                log.loc[esc.index, "router_kwh_attr"] = energy.record_kwh(rs) / len(esc)
             for j, r in enumerate(pool):
                 log.loc[esc.index, f"router_p_{r}"] = P[j]
             log.loc[esc.index, "chosen_model"] = [pool[k] for k in P.argmax(axis=0)]
@@ -183,13 +183,16 @@ def main():
     log["total_kwh_attr"] = log["base_kwh_attr"] + log["router_kwh_attr"] + log["pool_kwh_attr"]
     log.to_csv(config.RESULTS_DIR / f"end_to_end_{name}_log.csv", index=False)
 
-    total_kwh = float(sum((p or {}).get("total_kwh", 0.0) for p in passes.values()))
-    gco2 = float(sum((p or {}).get("gco2e", 0.0) for p in passes.values()))
+    total_kwh = float(sum(energy.record_kwh(p) for p in passes.values() if p))
+    gco2 = float(sum((energy.emissions_g(p) or 0.0) for p in passes.values() if p))
     out = dict(config=cfg, tau=tau, n=n, accuracy=float(log["final_correct"].mean()),
                escalation_rate=float(log["escalated"].mean()),
                total_kwh=total_kwh, wh_per_1000=total_kwh / n * 1e6, gco2e=gco2, gco2e_per_q=gco2 / n,
                wall_s=time.time() - t0,
-               per_pass={k: {kk: (v or {}).get(kk) for kk in ("total_kwh", "gco2e", "duration_s", "n", "mean_w", "idle_w")}
+               per_pass={k: {**{kk: (v or {}).get(kk) for kk in
+                                 ("soc_kwh", "total_kwh", "gco2e", "duration_s", "n", "mean_w", "idle_w",
+                                  "carbon_factor_g_per_kwh", "cpu_kwh", "ram_kwh")},
+                             "record_kwh": energy.record_kwh(v) if v else None}
                          for k, v in passes.items()},
                per_dataset={ds: dict(acc=float(g["final_correct"].mean()), n=int(len(g)),
                                      escalated=float(g["escalated"].mean()))
