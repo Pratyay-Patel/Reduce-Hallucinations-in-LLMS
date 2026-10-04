@@ -60,15 +60,45 @@ def embed_all(q: pd.DataFrame, track: bool):
     return E
 
 
-def oof_auc(X, y, seed, C=0.5):
+def make_head(name: str, seed: int = 0, C: float = 0.5):
+    """Router head = a probabilistic classifier on [confidence, PCA(embedding)].
+
+    No class_weight anywhere: the router picks argmax P(right) across pool models, so each
+    model's base rate must survive -- 'balanced' erased exactly the dominance information.
+    lr is the literature default for dense embeddings; the others are the classifier families
+    the paper used on the 8 NeMo features, kept as an ablation (04 compares them out-of-fold).
+    """
+    if name == "lr":
+        return LogisticRegression(max_iter=4000, C=C)
+    if name == "rf":
+        from sklearn.ensemble import RandomForestClassifier
+        return RandomForestClassifier(n_estimators=300, min_samples_leaf=5, random_state=seed, n_jobs=-1)
+    if name == "xgb":
+        from xgboost import XGBClassifier
+        return XGBClassifier(n_estimators=300, max_depth=3, learning_rate=0.05, subsample=0.8,
+                             colsample_bytree=0.8, reg_lambda=1.0, random_state=seed, n_jobs=-1,
+                             eval_metric="logloss", verbosity=0)
+    if name == "svc":
+        from sklearn.svm import SVC
+        return SVC(C=1.0, kernel="rbf", probability=True, random_state=seed)
+    if name == "mlp":
+        from sklearn.neural_network import MLPClassifier
+        return MLPClassifier(hidden_layer_sizes=(64,), alpha=1e-2, max_iter=1000, early_stopping=True,
+                             random_state=seed)
+    if name == "voting":
+        from sklearn.ensemble import VotingClassifier
+        return VotingClassifier([("lr", make_head("lr", seed, C)), ("rf", make_head("rf", seed)),
+                                 ("xgb", make_head("xgb", seed))], voting="soft")
+    raise ValueError(name)
+
+
+def oof_auc(X, y, seed, C=0.5, head="lr"):
     if y.sum() < 5 or (1 - y).sum() < 5:
         return np.nan, np.full(len(y), y.mean())
     p = np.zeros(len(y))
     for tr, te in StratifiedKFold(5, shuffle=True, random_state=seed).split(X, y):
         sc = StandardScaler().fit(X[tr])
-        # no class_weight: the router picks argmax P(right) across pool models, so each model's
-        # base rate must survive -- 'balanced' erased exactly the dominance information
-        m = LogisticRegression(max_iter=4000, C=C).fit(sc.transform(X[tr]), y[tr])
+        m = make_head(head, seed, C).fit(sc.transform(X[tr]), y[tr])
         p[te] = m.predict_proba(sc.transform(X[te]))[:, 1]
     return roc_auc_score(y, p), p
 
@@ -117,36 +147,73 @@ def main():
     lines += [f"| {k} | {v:.3f} |" for k, v in aucs.items()]
     print("base-wrong AUC:", {k: round(v, 3) for k, v in aucs.items()})
 
-    # ---- "where": per pool model P(right), choose C by CV, fit final
-    lines += ["", "## Target: pool model is right", "",
+    # ---- "where": per pool model P(right). Feature ablation with lr, then head ablation.
+    lines += ["", "## Target: pool model is right (lr head, feature ablation)", "",
               "| pool model | conf | PCA32 | conf+PCA32 | subject | chosen C |", "|---|---:|---:|---:|---:|---:|"]
-    router = {"pool": pool, "pca_dims": config.PCA_DIMS, "models": {}}
-    P_oof = {}
+    best_C = {}
     for r in pool:
         y = C[r]
         a_c = np.nanmean([oof_auc(Xc, y, s)[0] for s in config.ROUTER_SEEDS])
         a_e = np.nanmean([oof_auc(Xpca[:, 1:], y, s)[0] for s in config.ROUTER_SEEDS])
         a_s = np.nanmean([oof_auc(S, y, s)[0] for s in config.ROUTER_SEEDS])
-        best_c, best_a, best_p = None, -1, None
+        best_c, best_a = None, -1
         for c in C_GRID:
-            res = [oof_auc(Xpca, y, s, C=c) for s in config.ROUTER_SEEDS]
-            a = np.nanmean([x[0] for x in res])
+            a = np.nanmean([oof_auc(Xpca, y, s, C=c)[0] for s in config.ROUTER_SEEDS])
             if a > best_a:
-                best_c, best_a, best_p = c, a, np.mean([x[1] for x in res], axis=0)
-        P_oof[r] = best_p
+                best_c, best_a = c, a
+        best_C[r] = best_c
+        lines.append(f"| {r} | {a_c:.3f} | {a_e:.3f} | {best_a:.3f} | {a_s:.3f} | {best_c} |")
+        print(f"{r}: conf {a_c:.3f}  emb {a_e:.3f}  both {best_a:.3f}  subject {a_s:.3f}  C={best_c}")
+
+    # head ablation: same features, every classifier family; OOF AUC per pool model and the OOF
+    # hybrid accuracy the head's argmax picks produce at tau = 1 (every question routed)
+    stack = np.vstack([C[r] for r in pool])
+    heads = [h for h in config.ROUTER_HEADS]
+    lines += ["", "## Head ablation (conf + PCA32 features, OOF)", "",
+              "| head | " + " | ".join(f"AUC {r}" for r in pool) + " | mean AUC | routed acc (all escalated) | oracle |",
+              "|---|" + "---:|" * (len(pool) + 3)]
+    head_res = {}
+    for h in heads:
+        try:
+            P_h, A_h = [], []
+            for r in pool:
+                res = [oof_auc(Xpca, C[r], s, C=best_C[r], head=h) for s in config.ROUTER_SEEDS]
+                A_h.append(np.nanmean([x[0] for x in res]))
+                P_h.append(np.mean([x[1] for x in res], axis=0))
+            P_h = np.vstack(P_h)
+            routed = stack[P_h.argmax(axis=0), np.arange(n)].mean()
+            head_res[h] = dict(aucs=A_h, mean_auc=float(np.nanmean(A_h)), P=P_h, routed=float(routed))
+            lines.append(f"| {h} | " + " | ".join(f"{a:.3f}" for a in A_h) +
+                         f" | {head_res[h]['mean_auc']:.3f} | {routed:.3f} | {stack.max(axis=0).mean():.3f} |")
+            print(f"head {h:<7} AUC {[round(a, 3) for a in A_h]}  mean {head_res[h]['mean_auc']:.3f}  routed {routed:.3f}")
+        except Exception as e:                      # e.g. xgboost not installed
+            lines.append(f"| {h} | " + " | ".join("-" for _ in pool) + f" | - | - | ({type(e).__name__}) |")
+            print(f"head {h}: skipped ({type(e).__name__}: {e})")
+    if config.ROUTER_HEAD == "auto":
+        # select on the objective the router is used for -- OOF accuracy of its argmax picks --
+        # not on AUC: on the first Mac run rf had the best AUC and the worst routed accuracy
+        head = max(head_res, key=lambda h: (round(head_res[h]["routed"], 4), head_res[h]["mean_auc"]))
+    else:
+        head = config.ROUTER_HEAD
+        if head not in head_res:
+            sys.exit(f"router head {head} did not train")
+    lines += ["", f"**Head used: `{head}`** ({'best OOF routed accuracy, ties by mean AUC' if config.ROUTER_HEAD == 'auto' else 'fixed in config'})."]
+    print(f"router head: {head}")
+
+    # fit the chosen head on all train rows, per pool model
+    router = {"pool": pool, "pca_dims": config.PCA_DIMS, "head": head, "models": {}}
+    for j, r in enumerate(pool):
         pca = PCA(config.PCA_DIMS, random_state=0).fit(E)
         X = np.hstack([conf.reshape(-1, 1), pca.transform(E)])
         sc = StandardScaler().fit(X)
-        lr = LogisticRegression(max_iter=4000, C=best_c).fit(sc.transform(X), y)
-        router["models"][r] = {"pca": pca, "scaler": sc, "lr": lr, "C": best_c, "oof_auc": best_a}
-        lines.append(f"| {r} | {a_c:.3f} | {a_e:.3f} | {best_a:.3f} | {a_s:.3f} | {best_c} |")
-        print(f"{r}: conf {a_c:.3f}  emb {a_e:.3f}  both {best_a:.3f}  subject {a_s:.3f}  C={best_c}")
+        clf = make_head(head, 0, best_C[r]).fit(sc.transform(X), C[r])
+        router["models"][r] = {"pca": pca, "scaler": sc, "clf": clf, "C": best_C[r],
+                               "oof_auc": head_res[head]["aucs"][j]}
     with open(config.ROUTER_DIR / "router.pkl", "wb") as f:
         pickle.dump(router, f)
 
-    # ---- tau sweep on train (OOF router picks), to choose tau*
-    stack = np.vstack([C[r] for r in pool])
-    P = np.vstack([P_oof[r] for r in pool])
+    # ---- tau sweep on train (OOF router picks of the chosen head), to choose tau*
+    P = head_res[head]["P"]
     choice = P.argmax(axis=0)
     best_single = max(roles, key=lambda r: C[r].mean())
     lines += ["", f"## tau sweep on train (hybrid = base -> router pick; plain = base -> {best_single})", "",
@@ -163,7 +230,9 @@ def main():
     inner = [s for s in sweep if 0 < s["escalated"] < 1]
     tau_star = max(inner or sweep, key=lambda s: (round(s["hybrid"], 4), -s["escalated"]))["tau"]
     thresholds = {"tau_star": tau_star, "best_single": best_single, "sweep": sweep,
-                  "base_wrong_auc": aucs, "pool": pool}
+                  "base_wrong_auc": aucs, "pool": pool, "head": head,
+                  "head_ablation": {h: {"aucs": v["aucs"], "mean_auc": v["mean_auc"], "routed": v["routed"]}
+                                    for h, v in head_res.items()}}
     (config.ROUTER_DIR / "thresholds.json").write_text(json.dumps(thresholds, indent=2))
     lines += ["", f"**tau\\* = {tau_star}** (best OOF hybrid accuracy on train, ties to least escalation)"]
     (config.RESULTS_DIR / "router_train.md").write_text("\n".join(lines), encoding="utf-8")

@@ -149,7 +149,7 @@ def main():
             with ctx as run:
                 E = SentenceTransformer(config.ROUTER_EMBEDDER).encode(
                     texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
-                P = np.vstack([router["models"][r]["lr"].predict_proba(
+                P = np.vstack([router["models"][r]["clf"].predict_proba(
                     router["models"][r]["scaler"].transform(
                         np.hstack([conf, router["models"][r]["pca"].transform(E)])))[:, 1]
                     for r in pool])

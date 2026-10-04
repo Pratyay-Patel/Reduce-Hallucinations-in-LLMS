@@ -86,6 +86,11 @@ ROUTER_EMBEDDER = "sentence-transformers/all-MiniLM-L6-v2"
 TAU_GRID = (0.0, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.01)  # 1.01 = escalate all
 PCA_DIMS = 32
 ROUTER_SEEDS = (0, 1, 42, 7)
+# router heads compared out-of-fold in 04; "auto" picks the best OOF routed accuracy (ties by AUC).
+# lr is the literature default for dense embeddings; rf/xgb/svc/mlp/voting are the classifier
+# families the paper used on the 8 NeMo features, kept as an ablation.
+ROUTER_HEADS = ("lr", "rf", "xgb", "svc", "mlp", "voting")
+ROUTER_HEAD = "auto"
 
 # ----------------------------------------------------------------------------- device
 def pick_device() -> str:

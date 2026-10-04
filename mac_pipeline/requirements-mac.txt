@@ -11,5 +11,6 @@ pandas
 numpy
 matplotlib
 openpyxl
-codecarbon>=3.0       # reads sudo powermetrics on Apple Silicon
+codecarbon>=3.0       # carbon factor + reporting; energy itself comes from sudo powermetrics
+xgboost               # router-head ablation (the paper's classifier family)
 huggingface_hub

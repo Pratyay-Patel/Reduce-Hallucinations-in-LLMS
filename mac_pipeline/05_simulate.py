@@ -99,7 +99,7 @@ def main():
     eid = pd.read_csv(config.ROUTER_DIR / "embedding_ids.csv")["id"].tolist()
     id2row = {i: k for k, i in enumerate(eid)}
     E = E_all[[id2row[i] for i in ids]]
-    P = np.vstack([router["models"][r]["lr"].predict_proba(
+    P = np.vstack([router["models"][r]["clf"].predict_proba(
         router["models"][r]["scaler"].transform(
             np.hstack([conf.reshape(-1, 1), router["models"][r]["pca"].transform(E)])))[:, 1]
         for r in pool])
