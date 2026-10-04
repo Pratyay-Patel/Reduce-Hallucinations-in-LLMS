@@ -65,7 +65,9 @@ def oof_auc(X, y, seed, C=0.5):
     p = np.zeros(len(y))
     for tr, te in StratifiedKFold(5, shuffle=True, random_state=seed).split(X, y):
         sc = StandardScaler().fit(X[tr])
-        m = LogisticRegression(max_iter=4000, C=C, class_weight="balanced").fit(sc.transform(X[tr]), y[tr])
+        # no class_weight: the router picks argmax P(right) across pool models, so each model's
+        # base rate must survive -- 'balanced' erased exactly the dominance information
+        m = LogisticRegression(max_iter=4000, C=C).fit(sc.transform(X[tr]), y[tr])
         p[te] = m.predict_proba(sc.transform(X[te]))[:, 1]
     return roc_auc_score(y, p), p
 
@@ -134,7 +136,7 @@ def main():
         pca = PCA(config.PCA_DIMS, random_state=0).fit(E)
         X = np.hstack([conf.reshape(-1, 1), pca.transform(E)])
         sc = StandardScaler().fit(X)
-        lr = LogisticRegression(max_iter=4000, C=best_c, class_weight="balanced").fit(sc.transform(X), y)
+        lr = LogisticRegression(max_iter=4000, C=best_c).fit(sc.transform(X), y)
         router["models"][r] = {"pca": pca, "scaler": sc, "lr": lr, "C": best_c, "oof_auc": best_a}
         lines.append(f"| {r} | {a_c:.3f} | {a_e:.3f} | {best_a:.3f} | {a_s:.3f} | {best_c} |")
         print(f"{r}: conf {a_c:.3f}  emb {a_e:.3f}  both {best_a:.3f}  subject {a_s:.3f}  C={best_c}")
