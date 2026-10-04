@@ -6,10 +6,12 @@ system accuracy and emissions, all measured with CodeCarbon on Apple Silicon. De
 scoring, confidence for *whether*, embedding router for *where*, held-out test split,
 cost-matched random baseline, router overhead charged.
 
-**Status (2026-09-27): implemented.** Every script exists and was smoke-tested on the Windows
-dev box (real 1.5B scoring with CodeCarbon; synthetic pool scores for 03–07; a 0.5B stand-in
-pool for 06). The Mac-only parts (MPS device, `powermetrics`) are untested until `00_check_env.py`
-runs there. See §7 for the exact command sequence.
+**Status (2026-10-04): implemented and run once.** The first Mac run (`Results_Run1`, 2026-10-01)
+produced clean accuracy results but exposed two measurement faults and one dataset fault, all
+fixed since: CodeCarbon's CPU term was an 85 W-TDP model and its emissions omitted GPU energy
+(§2 now describes the direct `powermetrics` sampler that replaced it); AQuA-RAT sat at chance for
+three of four models under letter scoring and was replaced by CommonsenseQA; Llama-3B was never
+scored on ARC. A full rerun is needed for the energy tables. See §7 for the unattended script.
 
 ---
 
@@ -40,7 +42,7 @@ prehistory high_school_world_history`; social `high_school_psychology sociology 
 high_school_macroeconomics us_foreign_policy`; other `clinical_knowledge nutrition management
 marketing computer_security`.
 
-Total 2,000 questions × 4 models = 8,000 scored rows. (AQuA-RAT was the third set in the first
+Total 1,992 questions × 4 models ≈ 8,000 scored rows. (AQuA-RAT was the third set in the first
 run; letter-likelihood scoring cannot do multi-step arithmetic, so it was replaced by CommonsenseQA.) ARC has a variable option count, so the
 scorer must accept 3–5 options and the gate must use each question's own 1/k.
 
@@ -54,11 +56,26 @@ choice in `config.py`.
 
 ---
 
-## 2. Measuring energy on the Mac with CodeCarbon
+## 2. Measuring energy on the Mac
 
-What CodeCarbon does on Apple Silicon (from its methodology page): it reads CPU + GPU power
-from `powermetrics`, which **needs sudo**; without sudo it silently falls back to a constant
-TDP estimate, which is not a measurement. RAM is a fixed 1.5 W heuristic on ARM.
+**What is actually measurable.** On Apple Silicon the only source of power readings is
+`powermetrics`, which **needs password-less sudo**. It reports CPU, GPU, ANE and their sum
+("Combined Power") as Apple's own on-chip estimate, once per sample. It covers the SoC only:
+DRAM, display and SSD are not included, so it is a lower bound on machine energy, consistent
+across configurations on one machine and not comparable across devices.
+
+**What CodeCarbon 3.3.1 does on this platform, found in the first run:** its CPU term is a
+generic 85 W-TDP load model (floor 8.5 W, which appeared as a constant in every file), only its
+GPU term comes from `powermetrics`, RAM is a fixed 3 W heuristic, and its emissions figure omits
+the GPU energy entirely (every gCO₂e was ~30% low). So CodeCarbon is **not** the measurement.
+
+**Design.** `common/energy.py` streams `sudo powermetrics --samplers cpu_power,gpu_power -i 1000`
+for the whole of every tracked run and integrates each sample's power over its elapsed time.
+The combined kWh is the **energy of record** (`soc_kwh`). CodeCarbon still runs alongside for
+the country carbon factor (read directly from its tables: 713.4 gCO₂e/kWh for `IND`) and for
+its standard report fields; its own kWh is kept in the summaries as `total_kwh` for comparison.
+Emissions = `soc_kwh × factor`. `record_kwh()` and `emissions_g()` give every downstream script
+one number each, and recompute old summaries the same way.
 
 Setup, once:
 ```
@@ -66,36 +83,30 @@ sudo visudo
 # add:  <username> ALL = (root) NOPASSWD: /usr/bin/powermetrics
 pip install -U codecarbon
 ```
-
-Tracker settings used by every script:
-```python
-EmissionsTracker(project_name=..., measure_power_secs=1, tracking_mode="machine",
-                 country_iso_code=COUNTRY, output_dir="mac_pipeline/energy",
-                 log_level="warning", allow_multiple_runs=True)
-```
-- `measure_power_secs=1`, not the default 15. A 1.5B question takes ~0.4 s; at 15 s the run
-  would be a handful of samples.
+- `00_check_env.py` runs a 30 s load and **fails unless powermetrics delivered SoC samples**.
+  Without them there is no measurement, only CodeCarbon's model.
 - `COUNTRY` is set explicitly in `config.py` so the CO₂ factor is the one the paper states.
-- `00_check_env.py` asserts `gpu_energy > 0` and `cpu_energy > 0` on a 30-second test run.
-  A zero means powermetrics was not allowed and the run is TDP-guessing. It also checks the
-  installed version is new enough that `gpu_power` is a run average, not the last sample
-  (CodeCarbon issue #985, fixed in PR #986).
 
-**Granularity.** Per-question tasks are too short for a 1 s power sampler. So:
-- Energy is measured **per model per dataset run** (one tracker session, thousands of questions).
-- Per-question energy is *attributed*: `E_q = E_run × seconds_q / Σ seconds`. This is stated as
+**Granularity.** One sample per second; a question takes 0.6–3 s, so per-question tracking
+would be noise. Therefore:
+- Energy is measured **per model per dataset run** (one tracked session, 500–1,000 questions,
+  hundreds to thousands of samples).
+- Per-question energy is *attributed*: `E_q = E_run × seconds_q / Σ seconds`. This assumes
+  roughly constant power across the run; under throttling it slightly over-charges slow late
+  questions. Exact for any group of questions, which is what every table uses. Stated as
   attribution in the paper.
-- Per-run we also record: idle baseline (60 s tracked with nothing running, before each model),
-  gross energy, net energy = gross − idle × duration, mean power, `powermetrics` thermal
-  pressure. Report gross; keep net for the appendix.
-- Router overhead (MiniLM embedding + logistic regression over the test set) is its own tracked
-  run and is **charged to every routed configuration**.
+- Per run we also record: idle baseline (60 s with nothing running, before each model), gross
+  energy, net = gross − idle × duration, mean power, `powermetrics` thermal pressure and mean
+  CPU clock. Report gross; keep net for the appendix.
+- Router overhead (MiniLM embedding over the escalated questions) is its own tracked run and
+  is **charged to every routed configuration**.
 
-**Conditions.** Plugged in, lid open, brightness fixed, no other apps, Wi-Fi off during scoring
-(models are pre-downloaded), same thermal start (5 min idle between models). Fanless Air
-throttles under sustained load: log clock speed from `powermetrics` and report it.
+**Conditions.** Plugged in, lid open, brightness fixed, no other apps, models pre-downloaded,
+`caffeinate` keeping machine and display awake, 5 min idle between models. The first run
+showed the fanless Air at "Heavy" thermal pressure with seconds/question rising 30–50% within
+a 3B run and idle at ~11.5 W against 17–21 W mean; report both.
 
-**Repeats.** One full run of everything, plus **3 repeats of the 200-question sanity subset per
+**Repeats.** One full run of everything, plus **3 repeats of the 200-question MMLU subset per
 model** to give an energy standard deviation for the tables.
 
 ---
@@ -119,7 +130,7 @@ mac_pipeline/
   07_report.py
   questions/             questions.csv, split.csv
   scores/                <role>.csv
-  energy/                emissions.csv (CodeCarbon), <role>_<dataset>.json, idle_*.json
+  energy/                <role>_<dataset>_r<k>.json, idle_*.json, emissions.csv (CodeCarbon's own log)
   router/                embeddings.npy, router.pkl, thresholds.json
   results/               tables (csv + md + one xlsx workbook), figures, end-to-end logs
 ```
@@ -147,11 +158,14 @@ mac_pipeline/
   questions (train and test) → writes `scores/R.csv`, one row per question:
   `id, dataset, subject, fold, model, chat_template, n_options, gold, pred, pred_letter,
   correct, graded, p_gold, logprobs (JSON list, one per option), prompt_tokens, seconds,
-  peak_mem_gb, energy_kwh_attr, run_id, repeat`
+  rendered_prompt (exact text the model saw), peak_mem_gb, energy_kwh_attr, run_id, repeat`
   and `energy/R_D_<repeat>.json`:
-  `role, model_id, dataset, repeat, run_id, n, duration_s, cpu_kwh, gpu_kwh, ram_kwh,
-  total_kwh, gco2e, carbon_intensity_g_per_kwh, country, mean_w, idle_w, idle_kwh_over_run,
-  net_kwh, thermal_pressure, mean_cpu_ghz, codecarbon_version, timestamp`.
+  `role, model_id, dataset, repeat, run_id, n, duration_s,
+  soc_kwh, soc_cpu_kwh, soc_gpu_kwh, soc_ane_kwh, soc_mean_w, soc_samples` (powermetrics, energy
+  of record), `cpu_kwh, gpu_kwh, ram_kwh, total_kwh, codecarbon_gco2e, cpu_w, gpu_w, ram_w`
+  (CodeCarbon, for comparison), `carbon_factor_g_per_kwh, gco2e` (= soc_kwh × factor), `country,
+  mean_w, idle_w, idle_kwh_over_run, net_kwh, thermal_pressure, mean_cpu_ghz, powermetrics,
+  codecarbon_version, timestamp`.
 - Re-running a role replaces its rows (same as `poc/run_extra_model.py`).
 - Order: `base` first (cheapest; its 200-question subset is the calibration check), then the
   three pool models. Rough time on the Air: base ~15 min, each 3B ~35–45 min.
@@ -244,9 +258,12 @@ Everything after step 3 is re-runnable from the CSVs without touching a model.
 ## 5. Checks and stop conditions
 
 - `00`: any model >15 points under published MMLU on the 200 subset → fix prompt format before
-  scoring 2,000. Energy fields zero → fix sudoers before anything.
-- `02`: `scores/R.csv` has 2,008 rows, no null `correct`, per-dataset accuracy above chance
-  for every model (the base at chance on a dataset makes its confidence useless there).
+  scoring 2,000. No powermetrics SoC samples → fix sudoers before anything.
+- `02`: `scores/R.csv` has 1,992 rows (993 MMLU + 500 CSQA + 499 ARC), no null `correct`,
+  per-dataset accuracy above chance for every model (the base at chance on a dataset makes its
+  confidence useless there), and no single predicted letter above ~40% on any dataset (a
+  position habit, the AQuA failure mode). `03`/`04`/`05` print a coverage warning if any role is
+  missing a dataset; do not proceed past it.
 - `03`: at least one pool pair passes both ways → hybrid is worth training. None → report
   cascade only. That is a valid paper result, not a failure.
 - `05` vs `06`: simulated and measured end-to-end energy within ~10 %. Larger gap → the
@@ -284,7 +301,7 @@ pip install -r mac_pipeline/requirements-mac.txt
 huggingface-cli login                      # Llama-3.2 is a gated repo; accept its licence on HF first
 sudo visudo                                # add: <user> ALL = (root) NOPASSWD: /usr/bin/powermetrics
 
-python mac_pipeline/01_build_questions.py                  # 2,000 questions + 70/30 split (already committed)
+python mac_pipeline/01_build_questions.py                  # 1,992 questions + 70/30 split (already committed)
 python mac_pipeline/00_check_env.py                        # env, energy, 200-q format check per model
 python mac_pipeline/02_score_model.py --role base
 python mac_pipeline/02_score_model.py --role qwen3b
