@@ -56,5 +56,12 @@ def pivot_scores(scores: pd.DataFrame, roles, fold=None):
         s = s[s["fold"] == fold]
     p = s.pivot_table(index="id", columns="model",
                       values=["correct", "graded", "seconds", "energy_kwh_attr", "n_options"])
-    p = p.dropna(subset=[("correct", r) for r in roles])
-    return p
+    full = p.dropna(subset=[("correct", r) for r in roles])
+    if len(full) < len(p):
+        # a role is missing some questions (e.g. one dataset never scored): everything
+        # downstream silently shrinks to the intersection, so say so loudly
+        cov = s.groupby(["model", "dataset"]).size().unstack(fill_value=0)
+        print(f"WARNING: only {len(full)} of {len(p)} questions"
+              f"{' in fold ' + fold if fold else ''} are scored by every role; the rest are dropped.\n"
+              f"coverage (rows per model x dataset):\n{cov.to_string()}\n")
+    return full
