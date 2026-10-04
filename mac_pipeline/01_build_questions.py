@@ -4,10 +4,12 @@ mac_pipeline/01_build_questions.py
 Build the question bank and the train/test split, once.
 
   mmlu  20 subjects x 50 (seeded sample of the test split)        4 options
-  aqua  AQuA-RAT test + validation                                  5 options
+  csqa  CommonsenseQA validation, seeded sample of 500             5 options
   arc   ARC-Challenge test, seeded sample of 500                    3-5 options
 
 Writes questions/questions.csv and questions/split.csv (70/30, stratified on dataset x subject).
+If a split.csv already exists, questions already in it keep their fold; only new ids are
+assigned, so swapping one dataset never disturbs what has already been scored.
 
 Run:  python mac_pipeline/01_build_questions.py
 """
@@ -49,21 +51,23 @@ def build_mmlu():
     return rows
 
 
-_AQUA_OPT = re.compile(r"^\s*([A-E])\s*[\)\.:]\s*")
-
-
-def build_aqua():
+def build_csqa():
+    # own generator: build_arc() draws from the shared `rng` right after build_mmlu(), and
+    # that sequence must stay identical so the ARC sample (already scored) does not change
+    own = np.random.default_rng(config.SEED + 1)
+    ds = load_dataset("tau/commonsense_qa", split="validation")
+    idx = sorted(own.choice(len(ds), min(config.CSQA_N, len(ds)), replace=False).tolist())
     rows = []
-    for split in config.AQUA_SPLITS:
-        ds = load_dataset("deepmind/aqua_rat", "raw", split=split)
-        for i, r in enumerate(ds):
-            opts = [_AQUA_OPT.sub("", o).strip() for o in r["options"]]
-            gold = LETTERS.index(r["correct"].strip().upper())
-            if len(opts) != 5 or not (0 <= gold < 5):
-                continue
-            rows.append(dict(id=f"aqua:{split}:{i}", dataset="aqua", subject="aqua", group="math",
-                             source_split=split, question=r["question"].strip(),
-                             choices=opts, gold=gold))
+    for i in idx:
+        r = ds[i]
+        labels = [str(x) for x in r["choices"]["label"]]
+        texts = [str(x).strip() for x in r["choices"]["text"]]
+        key = str(r["answerKey"]).strip()
+        if key not in labels or len(texts) != 5:
+            continue
+        rows.append(dict(id=f"csqa:validation:{i}", dataset="csqa", subject="commonsense", group="commonsense",
+                         source_split="validation", question=r["question"].strip(),
+                         choices=texts, gold=labels.index(key)))
     return rows
 
 
@@ -84,7 +88,7 @@ def build_arc():
 
 
 def main():
-    rows = build_mmlu() + build_aqua() + build_arc()
+    rows = build_mmlu() + build_csqa() + build_arc()
     q = pd.DataFrame(rows)
     before = len(q)
     q = q.drop_duplicates("question").reset_index(drop=True)
@@ -93,11 +97,17 @@ def main():
     q["prompt_text"] = [format_prompt(a, b) for a, b in zip(q["question"], q["choices"])]
     q["choices"] = q["choices"].apply(json.dumps)
 
-    strat = q["dataset"] + "/" + q["subject"]
-    tr, te = train_test_split(q.index, test_size=config.TEST_FRAC, random_state=config.SEED,
-                              stratify=strat)
-    split = pd.DataFrame({"id": q["id"], "fold": "train"})
-    split.loc[te, "fold"] = "test"
+    # keep existing fold assignments; split only ids not seen before
+    old = pd.read_csv(config.SPLIT_CSV) if config.SPLIT_CSV.exists() else pd.DataFrame(columns=["id", "fold"])
+    known = dict(zip(old["id"], old["fold"]))
+    new_idx = q.index[~q["id"].isin(known)]
+    split = pd.DataFrame({"id": q["id"], "fold": q["id"].map(known)})
+    if len(new_idx):
+        strat = (q.loc[new_idx, "dataset"] + "/" + q.loc[new_idx, "subject"])
+        _, te = train_test_split(new_idx, test_size=config.TEST_FRAC, random_state=config.SEED, stratify=strat)
+        split.loc[new_idx, "fold"] = "train"
+        split.loc[te, "fold"] = "test"
+    print(f"kept folds for {len(q) - len(new_idx)} existing ids; assigned {len(new_idx)} new ids")
 
     cols = ["id", "dataset", "subject", "group", "source_split", "question", "choices",
             "n_options", "gold", "gold_letter", "prompt_text"]

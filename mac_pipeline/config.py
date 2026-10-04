@@ -61,9 +61,12 @@ MMLU_SUBJECTS = {
                    "computer_security"],
 }
 MMLU_PER_SUBJECT = 50
-AQUA_SPLITS = ("test", "validation")     # 254 + 254
+CSQA_N = 500                              # CommonsenseQA validation (1,221 labelled), seeded sample
 ARC_N = 500
-DATASETS = ["mmlu", "aqua", "arc"]
+DATASETS = ["mmlu", "csqa", "arc"]
+# AQuA-RAT was the third dataset in the first Mac run (Results_Run1). Letter-likelihood scoring
+# cannot do multi-step arithmetic: three of four models sat at chance with a 60-75% position
+# habit. Replaced by CommonsenseQA, which needs knowledge/judgement, not calculation.
 
 SEED = 0
 TEST_FRAC = 0.30

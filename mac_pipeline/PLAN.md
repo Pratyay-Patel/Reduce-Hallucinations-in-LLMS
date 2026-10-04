@@ -31,7 +31,7 @@ Pool = {`qwen3b`, `phi4mini`, `llama3b`}. Llama needs the gated-repo licence acc
 | name | source | split used | n | options |
 |---|---|---|---:|---|
 | `mmlu` | `cais/mmlu`, 20 subjects × 50 | test | 1,000 | 4 |
-| `aqua` | `deepmind/aqua_rat` | test + validation | 508 | 5 |
+| `csqa` | `tau/commonsense_qa` | validation, seeded sample | 500 | 5 |
 | `arc` | `allenai/ai2_arc` ARC-Challenge | test, seeded sample | 500 | 3–5 |
 
 MMLU subjects, 5 per group: STEM `abstract_algebra college_mathematics high_school_mathematics
@@ -40,7 +40,8 @@ prehistory high_school_world_history`; social `high_school_psychology sociology 
 high_school_macroeconomics us_foreign_policy`; other `clinical_knowledge nutrition management
 marketing computer_security`.
 
-Total 2,008 questions × 4 models ≈ 8,000 scored rows. ARC has a variable option count, so the
+Total 2,000 questions × 4 models = 8,000 scored rows. (AQuA-RAT was the third set in the first
+run; letter-likelihood scoring cannot do multi-step arithmetic, so it was replaced by CommonsenseQA.) ARC has a variable option count, so the
 scorer must accept 3–5 options and the gate must use each question's own 1/k.
 
 **Split.** 70 / 30 train / test, stratified on `dataset × subject`, one fixed seed, written once
@@ -133,7 +134,7 @@ mac_pipeline/
 
 ### `01_build_questions.py`
 - Pulls the three datasets, normalises to `id, dataset, subject, question, choices (list),
-  gold (index)`, cleans AQuA option strings (`"A)5"` → `"5"`), drops rows with missing gold or
+  gold (index)`, drops rows with missing gold or
   <3 options, dedups on question text.
 - Writes `questions/questions.csv` with columns
   `id, dataset, subject, source_split, question, choices (JSON list), n_options, gold (index),
