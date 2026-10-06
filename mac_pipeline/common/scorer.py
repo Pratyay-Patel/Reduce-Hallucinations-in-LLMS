@@ -60,7 +60,9 @@ class OptionScorer:
         """Returns (input_ids [1,T] on CPU, letter_formatter). Model-free, so testable."""
         if chat_template:
             msgs = [{"role": "user", "content": prompt + "\nReply with the letter only."}]
-            enc = tok.apply_chat_template(msgs, add_generation_prompt=True,
+            # enable_thinking=False: Qwen3 templates otherwise open a <think> block in the
+            # assistant turn; other templates ignore the variable
+            enc = tok.apply_chat_template(msgs, add_generation_prompt=True, enable_thinking=False,
                                           return_tensors="pt", return_dict=True)
             ids = enc["input_ids"] if hasattr(enc, "keys") else enc
             return ids, (lambda i: LETTERS[i])            # assistant turn starts fresh: no space
