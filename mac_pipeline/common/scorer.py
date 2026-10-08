@@ -82,6 +82,54 @@ class OptionScorer:
         tok_lp = logp[-n_opt:].gather(1, tgt[:, None]).squeeze(1)
         return tok_lp.mean().item()
 
+    # ------------------------------------------------------------------ reason, then score letters
+    COT_INSTRUCTION = ("Think step by step, briefly. When you are done, finish with a line of the "
+                       "form 'Answer: X' where X is the letter of the correct option.")
+    COT_STEM = "\nTherefore, the answer is ("
+
+    @torch.inference_mode()
+    def score_cot(self, question: str, choices: list, gold: int, max_new_tokens: int = 256) -> dict:
+        """Let the model write its reasoning (greedy, bounded), then append a fixed answer stem
+        and score the option letters exactly as `score` does, conditioned on the reasoning.
+        The answer is never parsed from free text. Always uses the chat template: instruct
+        models reason in that format; the letter is scored as the continuation of the stem."""
+        import re
+        t0 = time.perf_counter()
+        prompt = format_prompt(question, choices).rsplit("\nAnswer:", 1)[0]
+        msgs = [{"role": "user", "content": prompt + "\n\n" + self.COT_INSTRUCTION}]
+        enc = self.tok.apply_chat_template(msgs, add_generation_prompt=True, enable_thinking=False,
+                                           return_tensors="pt", return_dict=True)
+        ids = (enc["input_ids"] if hasattr(enc, "keys") else enc).to(self.device)
+        out = self.model.generate(ids, max_new_tokens=max_new_tokens, do_sample=False,
+                                  pad_token_id=self.tok.pad_token_id)
+        gen_ids = out[0, ids.shape[1]:]
+        text = self.tok.decode(gen_ids, skip_special_tokens=True)
+        # strip a trailing EOS so the stem continues the assistant turn
+        gen_ids = gen_ids[gen_ids != self.tok.eos_token_id] if self.tok.eos_token_id is not None else gen_ids
+        stem_ids = self.tok(self.COT_STEM, add_special_tokens=False, return_tensors="pt").input_ids.to(self.device)
+        ctx = torch.cat([ids, gen_ids[None, :], stem_ids], dim=1)
+        lps = [self._option_logprob(ctx, LETTERS[i]) for i in range(len(choices))]
+        lps_t = torch.tensor(lps)
+        probs = torch.softmax(lps_t, dim=0)
+        pred = int(lps_t.argmax())
+        m = re.findall(r"Answer:\s*\(?([A-E])\)?", text)
+        stated = LETTERS.index(m[-1]) if m else None
+        if self.device == "mps":
+            torch.mps.synchronize()
+        return dict(
+            pred=pred, pred_letter=LETTERS[pred], correct=int(pred == gold),
+            graded=float(probs[pred]), p_gold=float(probs[gold]),
+            logprobs=[round(x, 5) for x in lps],
+            prompt_tokens=int(ids.shape[1]), reasoning_tokens=int(gen_ids.shape[0]),
+            truncated=int(gen_ids.shape[0] >= max_new_tokens),
+            stated_letter=(LETTERS[stated] if stated is not None else None),
+            stated_matches_scored=(None if stated is None else int(stated == pred)),
+            reasoning=text,
+            rendered_prompt=self.tok.decode(ids[0], skip_special_tokens=False),
+            seconds=time.perf_counter() - t0,
+            peak_mem_gb=self.peak_mem_gb(),
+        )
+
     def score(self, question: str, choices: list, gold: int) -> dict:
         t0 = time.perf_counter()
         prompt = format_prompt(question, choices)
