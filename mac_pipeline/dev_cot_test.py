@@ -70,6 +70,8 @@ def main():
                     s = sc.score_cot(q["question"], q["choices"], q["gold"], max_new_tokens=args.max_new_tokens)
                 s.pop("logprobs", None); s.pop("rendered_prompt", None)
                 rows.append(dict(id=q["id"], model=role, protocol=proto, gold=q["gold"], **s))
+                if proto == "cot":   # save after every reasoning question: a stopped run keeps its rows
+                    pd.DataFrame(rows).to_csv(os.path.join(args.out, "cot_test.csv"), index=False)
                 if (k + 1) % 20 == 0:
                     sub = [r for r in rows if r["model"] == role and r["protocol"] == proto]
                     print(f"  {role} {proto}: {k + 1}/{len(qs)} acc {np.mean([r['correct'] for r in sub]):.3f} "
