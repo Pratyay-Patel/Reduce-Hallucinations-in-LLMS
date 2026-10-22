@@ -38,10 +38,29 @@ def format_prompt(question, choices):
     return f"Question: {question}\n{opts}\nAnswer:"
 
 
+def _norm(t):
+    return " ".join(str(t).lower().split())
+
+
+def exclude_bank(examples, questions_csv):
+    """Drop any training example whose source question appears in the evaluation bank."""
+    if not questions_csv:
+        return examples
+    import csv
+    bank = set()
+    with open(questions_csv, encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            bank.add(_norm(row["question"]))
+    kept = [e for e in examples if _norm(e.get("key", "")) not in bank]
+    print(f"exclusion filter: dropped {len(examples) - len(kept)} examples that match the evaluation bank",
+          flush=True)
+    return kept
+
+
 def build_examples(subject, n, seed=0):
-    """Returns a list of {"prompt": str, "completion": str, "chat": bool}.
-    chat=True -> wrapped in the chat template (user/assistant); chat=False -> raw continuation,
-    matching how the Mac pipeline scores that subject."""
+    """Returns a list of {"prompt", "completion", "chat", "key"}; key = the source question text,
+    used by exclude_bank. chat=True -> wrapped in the chat template (user/assistant);
+    chat=False -> raw continuation, matching how the Mac pipeline scores that subject."""
     ex = []
     if subject == "math":
         ds = load_dataset("openai/gsm8k", "main", split="train").shuffle(seed=seed).select(range(n))
@@ -51,20 +70,33 @@ def build_examples(subject, n, seed=0):
             import re
             sol = re.sub(r"\([\d\.\+\-\*/ ]+=[\d\.]+\)", "", sol)
             ex.append(dict(prompt=r["question"].strip() + "\n\n" + COT_INSTRUCTION,
-                           completion=sol + f"\nAnswer: {ans.strip()}", chat=True))
+                           completion=sol + f"\nAnswer: {ans.strip()}", chat=True, key=r["question"]))
     elif subject == "code":
+        # MBPP's train split has only 374 rows; top up to n from CodeAlpaca-20k Python tasks
         ds = load_dataset("google-research-datasets/mbpp", "full", split="train").shuffle(seed=seed)
         ds = ds.select(range(min(n, len(ds))))
         for r in ds:
             tests = "\n".join(r["test_list"][:2])
             ex.append(dict(prompt=f"{r['text'].strip()}\nYour code should pass these tests:\n{tests}\n"
                                   "Reply with the Python code only.",
-                           completion="```python\n" + r["code"].strip() + "\n```", chat=True))
+                           completion="```python\n" + r["code"].strip() + "\n```", chat=True, key=r["text"]))
+        if len(ex) < n:
+            ca = load_dataset("sahil2801/CodeAlpaca-20k", split="train").shuffle(seed=seed)
+            for r in ca:
+                if len(ex) >= n:
+                    break
+                text = (r["instruction"] + " " + (r.get("input") or "") + " " + r["output"]).lower()
+                if "python" not in text and "def " not in r["output"]:
+                    continue
+                prompt = r["instruction"].strip() + (("\n" + r["input"].strip()) if r.get("input") else "")
+                ex.append(dict(prompt=prompt + "\nReply with the Python code only.",
+                               completion=r["output"].strip(), chat=True, key=r["instruction"]))
     elif subject == "knowledge":
         ds = load_dataset("cais/mmlu", "auxiliary_train", split="train").shuffle(seed=seed).select(range(n))
         for r in ds:
+            r = r.get("train", r)        # rows are nested under a "train" key in this config
             ex.append(dict(prompt=format_prompt(r["question"].strip(), [str(c).strip() for c in r["choices"]]),
-                           completion=f" {LETTERS[int(r['answer'])]}", chat=False))
+                           completion=f" {LETTERS[int(r['answer'])]}", chat=False, key=r["question"]))
     else:
         raise ValueError(subject)
     return ex
@@ -128,6 +160,8 @@ def main():
     ap.add_argument("--private", action="store_true", default=True)
     ap.add_argument("--country", default="IND")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--exclude", default=None,
+                    help="questions.csv of the evaluation bank; training rows matching it are dropped")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -160,7 +194,7 @@ def main():
     model = get_peft_model(model, lcfg)
     model.print_trainable_parameters()
 
-    examples = build_examples(args.subject, args.n, args.seed)
+    examples = exclude_bank(build_examples(args.subject, args.n, args.seed), args.exclude)
     ds = SFTDataset(examples, tok, args.max_len)
     print(f"{len(ds)} examples, mean tokens {sum(len(x[0]) for x in ds.items) / len(ds):.0f}", flush=True)
 
