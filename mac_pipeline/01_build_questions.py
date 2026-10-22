@@ -3,9 +3,10 @@ mac_pipeline/01_build_questions.py
 ----------------------------------
 Build the question bank and the train/test split, once.
 
-  mmlu  20 subjects x 50 (seeded sample of the test split)        4 options
-  csqa  CommonsenseQA validation, seeded sample of 500             5 options
-  arc   ARC-Challenge test, seeded sample of 500                    3-5 options
+  mmlu      20 subjects x 50 (seeded sample of the test split)         4 options
+  csqa      CommonsenseQA validation, seeded sample of 500              5 options
+  arc       ARC-Challenge test, seeded sample of 500                     3-5 options
+  codemmlu  CodeMMLU knowledge subsets, 100 each (5 subsets)            3-4 options
 
 Writes questions/questions.csv and questions/split.csv (70/30, stratified on dataset x subject).
 If a split.csv already exists, questions already in it keep their fold; only new ids are
@@ -87,8 +88,27 @@ def build_arc():
     return rows
 
 
+def build_codemmlu():
+    # own generator (seed + 2): must not disturb the MMLU/ARC draws from the shared `rng`
+    own = np.random.default_rng(config.SEED + 2)
+    rows = []
+    for sub in config.CODEMMLU_SUBSETS:
+        ds = load_dataset("Fsoft-AIC/CodeMMLU", sub, split="test")
+        idx = sorted(own.choice(len(ds), min(config.CODEMMLU_PER_SUBSET, len(ds)), replace=False).tolist())
+        for i in idx:
+            r = ds[i]
+            texts = [str(c).strip() for c in r["choices"]]
+            key = str(r["answer"]).strip().upper()
+            if key not in LETTERS[:len(texts)] or not (3 <= len(texts) <= 5):
+                continue
+            rows.append(dict(id=f"codemmlu:{sub}:{i}", dataset="codemmlu", subject=sub, group="code",
+                             source_split="test", question=r["question"].strip(),
+                             choices=texts, gold=LETTERS.index(key)))
+    return rows
+
+
 def main():
-    rows = build_mmlu() + build_csqa() + build_arc()
+    rows = build_mmlu() + build_csqa() + build_arc() + build_codemmlu()
     q = pd.DataFrame(rows)
     before = len(q)
     q = q.drop_duplicates("question").reset_index(drop=True)

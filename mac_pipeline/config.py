@@ -70,7 +70,11 @@ MMLU_SUBJECTS = {
 MMLU_PER_SUBJECT = 50
 CSQA_N = 500                              # CommonsenseQA validation (1,221 labelled), seeded sample
 ARC_N = 500
-DATASETS = ["mmlu", "csqa", "arc"]
+# CodeMMLU knowledge-style subsets (letter-scorable; the execution/completion/repair subsets need
+# mental execution and are left out), 100 per subset, seeded sample
+CODEMMLU_SUBSETS = ["api_frameworks", "dbms_sql", "programming_syntax", "software_principles", "others"]
+CODEMMLU_PER_SUBSET = 100
+DATASETS = ["mmlu", "csqa", "arc", "codemmlu"]
 # AQuA-RAT was the third dataset in the first Mac run (Results_Run1). Letter-likelihood scoring
 # cannot do multi-step arithmetic: three of four models sat at chance with a 60-75% position
 # habit. Replaced by CommonsenseQA, which needs knowledge/judgement, not calculation.
