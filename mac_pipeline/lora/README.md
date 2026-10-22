@@ -45,9 +45,18 @@ base model (downloaded, discarded)         base model (HF cache, already there)
    training run, library versions. The same file is inside the adapter repo.
 8. Confirm the adapter appears at `https://huggingface.co/<HF_USER>/<base>-lora-<subject>`.
 
-Subjects and what they train on: `math` = GSM8K train in reason-then-"Answer:" form;
-`code` = MBPP train (task + tests → code); `knowledge` = MMLU auxiliary_train in the pipeline's
-exact letter-scoring prompt.
+Subjects, their training data, and where each adapter is evaluated on the Mac:
+
+| subject | trains on | evaluated on |
+|---|---|---|
+| `math` | GSM8K train, reason-then-"Answer: N" (2,000 of 7,473) | AQuA-RAT with the reasoning protocol: `dev_cot_test.py --extra qwen3b_math=Qwen/Qwen2.5-3B-Instruct@<repo>` (the main pipeline's datasets are letter-scored; AQuA is not in the bank) |
+| `code` | MBPP train (374) topped up to 2,000 from CodeAlpaca-20k Python tasks | `codemmlu` dataset in the bank (489 q, letter-scored), via `02_score_model.py` |
+| `knowledge` | MMLU auxiliary_train in the pipeline's exact letter prompt (2,000 of 99,842) | `mmlu`, `csqa`, `arc` via `02_score_model.py` |
+
+Upload `mac_pipeline/questions/questions.csv` next to the script in Colab and the trainer drops any
+training row whose question is in the evaluation bank (the auxiliary set contains ARC training
+items; 0 matches against the current bank). All three adapters are also scored on every dataset
+as the forgetting check.
 
 ### C. Evaluate on the Mac
 

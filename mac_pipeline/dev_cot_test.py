@@ -52,14 +52,25 @@ def main():
     ap.add_argument("--max-new-tokens", type=int, default=256)
     ap.add_argument("--out", required=True)
     ap.add_argument("--models", nargs="*", default=list(MODELS))
+    ap.add_argument("--extra", nargs="*", default=[],
+                    help="additional entries name=base_id[@adapter], e.g. "
+                         "qwen3b_math=Qwen/Qwen2.5-3B-Instruct@user/qwen2.5-3b-instruct-lora-math")
     args = ap.parse_args()
+    adapters = {}
+    for spec in args.extra:
+        name, rest = spec.split("=", 1)
+        base, _, adapter = rest.partition("@")
+        MODELS[name] = base
+        adapters[name] = adapter or None
+        if name not in args.models:
+            args.models.append(name)
     os.makedirs(args.out, exist_ok=True)
     qs = load_aqua(args.n)
     dev = config.pick_device()
     print(f"{len(qs)} AQuA questions, device {dev}", flush=True)
     rows = []
     for role in args.models:
-        sc = OptionScorer(MODELS[role], dev, chat_template=False)
+        sc = OptionScorer(MODELS[role], dev, chat_template=False, adapter=adapters.get(role))
         for proto in ("letter", "cot"):
             t0 = time.time()
             for k, q in enumerate(qs):
