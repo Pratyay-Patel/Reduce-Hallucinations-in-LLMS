@@ -20,19 +20,32 @@ from common.data import LETTERS, format_prompt
 
 class OptionScorer:
     def __init__(self, model_id: str, device: str, chat_template: bool = False,
-                 max_length: int = 1024):
+                 max_length: int = 1024, adapter: str | None = None):
         # 1024 > the longest prompt (641 Qwen tokens for MMLU) plus any chat wrapper, so the
         # left-truncation in _option_logprob never fires on this question bank
         self.model_id = model_id
         self.device = device
         self.chat_template = chat_template
         self.max_length = max_length
+        self.adapter = adapter
         self.tok = AutoTokenizer.from_pretrained(model_id)
         if self.tok.pad_token is None:
             self.tok.pad_token = self.tok.eos_token
         self.model = AutoModelForCausalLM.from_pretrained(model_id, dtype=torch.float16)
+        if adapter:
+            # a LoRA adapter (HF repo id or local dir) trained on exactly this base; kept
+            # unmerged so several adapters can share one loaded base (load_adapter/set_adapter)
+            from peft import PeftModel
+            self.model = PeftModel.from_pretrained(self.model, adapter)
         self.model = self.model.to(device).eval()
         self.reset_peak()
+
+    def add_adapter(self, name: str, adapter: str):
+        """Attach another adapter to the same base; switch with `use_adapter(name)`."""
+        self.model.load_adapter(adapter, adapter_name=name)
+
+    def use_adapter(self, name: str):
+        self.model.set_adapter(name)
 
     # ------------------------------------------------------------------ memory helpers
     def reset_peak(self):

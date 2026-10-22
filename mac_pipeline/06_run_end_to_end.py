@@ -42,7 +42,7 @@ from common.scorer import OptionScorer
 def run_model(role, sub: pd.DataFrame, tag: str, device, no_energy: bool, idle_secs: int):
     """Score `sub` with one model inside one tracked run. Returns (rows df, summary or None)."""
     m = config.MODELS[role]
-    sc = OptionScorer(m["id"], device, chat_template=m["chat_template"])
+    sc = OptionScorer(m["id"], device, chat_template=m["chat_template"], adapter=m.get("adapter"))
     r0 = sub.iloc[0]
     sc.score(r0["question"], r0["choices"], int(r0["gold"]))          # warm-up, untracked
     idle = {} if no_energy else energy.idle_baseline(idle_secs, tag)

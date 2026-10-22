@@ -113,7 +113,7 @@ def model_checks(roles):
         res = {}
         for ct in (False, True):
             try:
-                sc = OptionScorer(m["id"], dev, chat_template=ct)
+                sc = OptionScorer(m["id"], dev, chat_template=ct, adapter=m.get("adapter"))
             except Exception as e:
                 print(f"{role:<10}{'chat' if ct else 'raw':<10} LOAD FAILED: {type(e).__name__}: {e}")
                 continue

@@ -46,6 +46,13 @@ MODELS = {
     "qwen3b":   dict(id="Qwen/Qwen2.5-3B-Instruct",        chat_template=False, published_mmlu=65.6),
     "phi4mini": dict(id="microsoft/Phi-4-mini-instruct",   chat_template=True,  published_mmlu=67.3),
     "llama3b":  dict(id="meta-llama/Llama-3.2-3B-Instruct", chat_template=True,  published_mmlu=63.4),
+    # LoRA roles: a base id plus an adapter (HF repo id from lora/colab_train_lora.ipynb, or a
+    # local dir). The adapter must have been trained on exactly that base. Uncomment and edit
+    # once the adapters exist, then add the roles to POOL.
+    # "qwen3b_math": dict(id="Qwen/Qwen2.5-3B-Instruct", adapter="<hf-user>/qwen2.5-3b-instruct-lora-math",
+    #                     chat_template=False, published_mmlu=65.6),
+    # "qwen3b_code": dict(id="Qwen/Qwen2.5-3B-Instruct", adapter="<hf-user>/qwen2.5-3b-instruct-lora-code",
+    #                     chat_template=False, published_mmlu=65.6),
 }
 ALL_ROLES = [BASE] + POOL
 
@@ -109,6 +116,10 @@ def _apply_overrides():
     if os.environ.get("MACPIPE_MODEL_OVERRIDE"):
         for role, mid in json.loads(os.environ["MACPIPE_MODEL_OVERRIDE"]).items():
             MODELS[role]["id"] = mid
+    # dev only: MACPIPE_ADAPTER_OVERRIDE='{"base": "/path/or/repo"}' attaches an adapter to a role
+    if os.environ.get("MACPIPE_ADAPTER_OVERRIDE"):
+        for role, ad in json.loads(os.environ["MACPIPE_ADAPTER_OVERRIDE"]).items():
+            MODELS[role]["adapter"] = ad
     if OVERRIDES_JSON.exists():
         ov = json.loads(OVERRIDES_JSON.read_text())
         for role, ct in ov.get("chat_template", {}).items():

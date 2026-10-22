@@ -51,7 +51,9 @@ def main():
 
     print(f"role={role}  model={m['id']}  device={device}  chat_template={ct}  repeat={args.repeat}")
     t0 = time.time()
-    scorer = OptionScorer(m["id"], device, chat_template=ct)
+    scorer = OptionScorer(m["id"], device, chat_template=ct, adapter=m.get("adapter"))
+    if m.get("adapter"):
+        print(f"adapter: {m['adapter']}")
     print(f"loaded in {time.time() - t0:.0f}s   peak mem {scorer.peak_mem_gb():.2f} GB")
 
     new_rows = []

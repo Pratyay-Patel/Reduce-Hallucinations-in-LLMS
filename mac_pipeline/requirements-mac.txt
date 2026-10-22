@@ -13,4 +13,5 @@ matplotlib
 openpyxl
 codecarbon>=3.0       # carbon factor + reporting; energy itself comes from sudo powermetrics
 xgboost               # router-head ablation (the paper's classifier family)
+peft>=0.13            # LoRA adapters (lora/); match the major version used on Colab
 huggingface_hub
