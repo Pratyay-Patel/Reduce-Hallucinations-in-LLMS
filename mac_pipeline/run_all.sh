@@ -23,9 +23,11 @@ MODE="${MODE:-full}"                  # full | minimal
 COOLDOWN="${COOLDOWN:-300}"           # seconds of idle between model runs (thermal reset)
 REPEATS="${REPEATS:-3}"               # energy repeats on the 200-question MMLU subset
 PYTHON="${PYTHON:-python3}"
-ROLES=(base qwen3b phi4mini llama3b)
-POOL=(qwen3b phi4mini llama3b)
-DATASETS=(mmlu csqa arc)
+# roles, pool and datasets come from config.py so adapter roles / new datasets need no edit here
+_cfg() { "$PYTHON" -c "import sys; sys.path.insert(0, 'mac_pipeline'); import config; print(' '.join(config.$1))"; }
+read -r -a ROLES    <<< "$(_cfg ALL_ROLES)"
+read -r -a POOL     <<< "$(_cfg POOL)"
+read -r -a DATASETS <<< "$(_cfg DATASETS)"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"

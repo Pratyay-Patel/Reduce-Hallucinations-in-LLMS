@@ -2,7 +2,12 @@
 mac_pipeline/lora/train_lora.py
 -------------------------------
 Train one LoRA adapter that teaches a base model one subject, log the training energy with
-CodeCarbon, and push the adapter (30-40 MB) to a private Hugging Face repo.
+CodeCarbon, and push the adapter (~70 MB for a 1.5B, ~120 MB for a 3B at rank 16) to a private
+Hugging Face repo.
+
+If the loss turns NaN on a T4 (fp16 has no bf16 fallback there), rerun with --four-bit: the
+base is then held in 4-bit with fp16 compute, which is numerically tamer; the adapter still
+loads on an fp16 base at inference.
 
 Runs on Colab (T4) or locally. Plain `transformers.Trainer` with a hand-written collator so it
 does not depend on TRL's changing API. Loss is computed on the assistant's tokens only.
@@ -20,6 +25,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import time
 
 import torch
@@ -67,7 +73,6 @@ def build_examples(subject, n, seed=0):
         for r in ds:
             sol, ans = r["answer"].split("####")
             sol = sol.strip().replace("<<", "").replace(">>", "")   # drop calculator annotations
-            import re
             sol = re.sub(r"\([\d\.\+\-\*/ ]+=[\d\.]+\)", "", sol)
             ex.append(dict(prompt=r["question"].strip() + "\n\n" + COT_INSTRUCTION,
                            completion=sol + f"\nAnswer: {ans.strip()}", chat=True, key=r["question"]))
@@ -173,17 +178,23 @@ def main():
         tok.pad_token = tok.eos_token
     tok.padding_side = "right"
 
+    def load_base(**kw):
+        # transformers 5 names the argument `dtype`; 4.x (what Colab installs) names it `torch_dtype`
+        try:
+            return AutoModelForCausalLM.from_pretrained(args.base, dtype=torch.float16, **kw)
+        except TypeError:
+            return AutoModelForCausalLM.from_pretrained(args.base, torch_dtype=torch.float16, **kw)
+
     if args.four_bit:
         from transformers import BitsAndBytesConfig
         from peft import prepare_model_for_kbit_training
-        model = AutoModelForCausalLM.from_pretrained(
-            args.base, device_map={"": 0},
-            quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
-                                                   bnb_4bit_compute_dtype=torch.float16,
-                                                   bnb_4bit_use_double_quant=True))
+        model = load_base(device_map={"": 0},
+                          quantization_config=BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                                                                 bnb_4bit_compute_dtype=torch.float16,
+                                                                 bnb_4bit_use_double_quant=True))
         model = prepare_model_for_kbit_training(model)
     else:
-        model = AutoModelForCausalLM.from_pretrained(args.base, dtype=torch.float16).to(dev)
+        model = load_base().to(dev)
     model.gradient_checkpointing_enable()
     model.enable_input_require_grads()
     model.config.use_cache = False
@@ -192,6 +203,11 @@ def main():
                       task_type="CAUSAL_LM",
                       target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"])
     model = get_peft_model(model, lcfg)
+    # the trainable (LoRA) weights must be fp32 for fp16 mixed precision: the GradScaler refuses
+    # to unscale fp16 gradients. peft usually does this itself; make it explicit.
+    for p in model.parameters():
+        if p.requires_grad and p.dtype != torch.float32:
+            p.data = p.data.float()
     model.print_trainable_parameters()
 
     examples = exclude_bank(build_examples(args.subject, args.n, args.seed), args.exclude)

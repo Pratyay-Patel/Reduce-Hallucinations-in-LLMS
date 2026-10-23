@@ -81,6 +81,23 @@ as the forgetting check.
 - Training energy is in `training_summary.json`; report it separately and amortised over the
   questions served (e.g. per 1,000 questions), the same way the router's own overhead is charged.
 
+## If training goes wrong
+
+- **Loss becomes NaN** on the T4 (fp16, no bf16): rerun with `FOUR_BIT=True`. The base is held in
+  4-bit with fp16 compute, which is numerically tamer; the adapter still loads on the fp16 base.
+- **`CUDA out of memory`**: lower `N_EXAMPLES` has no effect on memory; instead pass a smaller
+  batch by editing the Train cell's command (`"--batch", "2", "--grad-accum", "8"` keeps the same
+  effective batch of 16).
+- **Session disconnected**: rerun the Train cell; it starts from step 0 (cheap at this size).
+
+## Evaluating the math adapter (reasoning protocol)
+
+```
+python mac_pipeline/dev_cot_test.py --n 30 --max-new-tokens 512 --out ~/cot_3b --models   --extra qwen3b=Qwen/Qwen2.5-3B-Instruct qwen3b_math=Qwen/Qwen2.5-3B-Instruct@<user>/qwen2.5-3b-instruct-lora-math
+```
+`--models` with nothing after it switches off the default 1.5B entries; `--extra` adds the two
+3B roles, plain and with the adapter, on the same 30 AQuA questions.
+
 ## Dev-only switches
 
 `MACPIPE_ADAPTER_OVERRIDE='{"base": "/local/adapter/dir"}'` attaches an adapter to a role

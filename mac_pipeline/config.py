@@ -53,6 +53,8 @@ MODELS = {
     #                     chat_template=False, published_mmlu=65.6),
     # "qwen3b_code": dict(id="Qwen/Qwen2.5-3B-Instruct", adapter="<hf-user>/qwen2.5-3b-instruct-lora-code",
     #                     chat_template=False, published_mmlu=65.6),
+    # "qwen3b_knowledge": dict(id="Qwen/Qwen2.5-3B-Instruct", adapter="<hf-user>/qwen2.5-3b-instruct-lora-knowledge",
+    #                          chat_template=False, published_mmlu=65.6),
 }
 ALL_ROLES = [BASE] + POOL
 
