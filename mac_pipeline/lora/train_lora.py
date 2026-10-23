@@ -220,17 +220,8 @@ def main():
         tracker.start()
     except Exception as e:
         print("codecarbon unavailable:", e)
-    # resume from the latest checkpoint in --out/checkpoints (written every save_steps, e.g. to
-    # Drive) so a disconnected Colab session continues instead of restarting from step 0
-    ckpt_dir = os.path.join(args.out, "checkpoints")
-    resume = None
-    if os.path.isdir(ckpt_dir):
-        cks = [d for d in os.listdir(ckpt_dir) if d.startswith("checkpoint-")]
-        if cks:
-            resume = os.path.join(ckpt_dir, max(cks, key=lambda d: int(d.split("-")[1])))
-            print(f"resuming from {resume}", flush=True)
     t0 = time.time()
-    result = trainer.train(resume_from_checkpoint=resume)
+    result = trainer.train()
     wall = time.time() - t0
     energy = {}
     if tracker:
