@@ -38,9 +38,10 @@ base model (downloaded, discarded)         base model (HF cache, already there)
 4. Runtime → **Run all**. Paste the write token when the login cell asks.
 5. If the fetch cell stops, upload `train_lora.py` through the Files panel and run the cell again.
 6. Wait. Rough times on a T4 for 2,000 examples × 2 epochs: 1.5B ≈ 40 min, 3B ≈ 1–2 h,
-   7B (QLoRA) ≈ 3–4 h. Checkpoints go to Drive every 200 steps if `USE_DRIVE` is on, so a
-   disconnected session can be resumed by re-running (the trainer picks up the last checkpoint
-   only if you pass `--resume_from_checkpoint`; simplest is to rerun from scratch for a 1.5B).
+   7B (QLoRA) ≈ 3–4 h. Checkpoints go to Drive every 200 steps if `USE_DRIVE` is on. If the
+   session disconnects, reconnect and Run all again: the script finds the latest checkpoint in
+   the Drive output folder and continues from it. The base model is re-downloaded (about a
+   minute), which is faster than reading 6 GB from Drive.
 7. The last cell prints `training_summary.json`: steps, loss, wall time, kWh and gCO₂e of the
    training run, library versions. The same file is inside the adapter repo.
 8. Confirm the adapter appears at `https://huggingface.co/<HF_USER>/<base>-lora-<subject>`.
