@@ -61,20 +61,48 @@ current bank). All three adapters are also scored on every dataset as the forget
 
 ### C. Evaluate on the Mac
 
-1. `pip install -r mac_pipeline/requirements-mac.txt` (adds `peft`), then `huggingface-cli login`
-   with a **read** token so the private adapter repo is reachable.
-2. In `mac_pipeline/config.py`, uncomment a LoRA role and set its `adapter` to the repo id.
-   The `id` must be the same base the adapter was trained on. Add the role to `POOL` if it is a
-   pool member.
-3. Quick sanity check on 60 questions before anything long:
-   ```
-   python mac_pipeline/02_score_model.py --role qwen3b_math --dataset mmlu --limit 60 --no-energy
-   ```
-   and compare to the plain `qwen3b` on the same 60 (`--limit` is seeded, so the questions match).
-4. Regression check: the adapter must not lose more than ~1 point on the datasets it was not
-   trained for. If it does, lower the learning rate or the epochs and retrain.
-5. Full run: `bash mac_pipeline/run_all.sh` as before. The adapter roles are scored, gated,
-   routed and energy-measured exactly like any other role.
+**0. Setup, once**
+```
+git pull
+pip install -r mac_pipeline/requirements-mac.txt
+huggingface-cli login        # read token: the adapter repo is private
+```
+The 3B base is already in the Mac's cache from the earlier runs; the adapter (~120 MB) is pulled by
+its repo id the first time a role uses it.
+
+**1. Math check, reasoning protocol (~25 min).** Plain 3B against 3B + adapter on the same 30 AQuA
+questions:
+```
+python mac_pipeline/dev_cot_test.py --n 30 --max-new-tokens 512 --out ~/cot_3b --models   --extra qwen3b=Qwen/Qwen2.5-3B-Instruct           qwen3b_math=Qwen/Qwen2.5-3B-Instruct@<HF_USER>/qwen2.5-3b-instruct-lora-math
+```
+`--models` with nothing after it switches off the default 1.5B entries. Read the `cot` rows of the
+summary: `qwen3b_math` vs `qwen3b`. A gain of 10+ points on 30 questions is a real signal; under 5
+is not shown either way at that size. If truncation is above 50 %, rerun with `--max-new-tokens 768`.
+
+**2. Forgetting check, letter-scored (~10 min).** In `config.py` uncomment the `qwen3b_math` role
+and set its `adapter` to the repo id (leave `POOL` alone for now). Then, on the same seeded 60
+questions per dataset:
+```
+for ds in mmlu csqa arc codemmlu; do
+  python mac_pipeline/02_score_model.py --role qwen3b_math --dataset $ds --limit 60 --no-energy
+  python mac_pipeline/02_score_model.py --role qwen3b      --dataset $ds --limit 60 --no-energy
+done
+```
+The adapter should be within ~1 point of the plain 3B on `mmlu`, `csqa`, `arc`. A drop of 3+
+means it overwrote general knowledge: retrain with one epoch or a lower learning rate first.
+(The math adapter was trained in the chat format and these datasets use the raw prompt, as the
+`qwen3b` role does; that is the right comparison for forgetting, but do not expect a gain here.)
+
+**3. Full run, only if 1 and 2 pass.** Add the role to `POOL`, then
+```
+bash mac_pipeline/run_all.sh
+```
+Roles and datasets are read from `config.py`, so the adapter role is scored, gated, routed and
+energy-measured like every other model. Report: `mac_pipeline/results/report.md`.
+
+The same three steps apply to the `code` adapter (check on `codemmlu` instead of AQuA, step 1 via
+`02_score_model.py`) and the `knowledge` adapter (check on `mmlu`/`csqa`/`arc`; for it, step 2
+*is* the check).
 
 ### D. Reporting
 
@@ -90,14 +118,6 @@ current bank). All three adapters are also scored on every dataset as the forget
   batch by editing the Train cell's command (`"--batch", "2", "--grad-accum", "8"` keeps the same
   effective batch of 16).
 - **Session disconnected**: rerun the Train cell; it starts from step 0 (cheap at this size).
-
-## Evaluating the math adapter (reasoning protocol)
-
-```
-python mac_pipeline/dev_cot_test.py --n 30 --max-new-tokens 512 --out ~/cot_3b --models   --extra qwen3b=Qwen/Qwen2.5-3B-Instruct qwen3b_math=Qwen/Qwen2.5-3B-Instruct@<user>/qwen2.5-3b-instruct-lora-math
-```
-`--models` with nothing after it switches off the default 1.5B entries; `--extra` adds the two
-3B roles, plain and with the adapter, on the same 30 AQuA questions.
 
 ## Dev-only switches
 
