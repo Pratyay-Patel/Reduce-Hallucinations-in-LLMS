@@ -25,38 +25,27 @@ base model (downloaded, discarded)         base model (HF cache, already there)
 ### A. Before Colab (once)
 
 1. Hugging Face account with a **write** token (Settings → Access Tokens → New → Write).
+   Optional but convenient: save it in Colab as a secret named `HF_TOKEN` (key icon, left sidebar).
 2. If the base is gated (Llama), accept its licence on its model page. Qwen is not gated.
-3. Push this repo's `mac_pipeline/lora/train_lora.py` somewhere Colab can fetch it, or plan to
-   upload the file through Colab's Files panel (left sidebar, upload icon).
+3. Optional: put `mac_pipeline/questions/questions.csv` in `MyDrive/lora_runs/` so evaluation
+   questions are excluded from training.
 
 ### B. Train one adapter on Colab (repeat per subject)
 
-1. Open `colab_train_lora.ipynb` in Colab (File → Upload notebook).
+The notebook is self-contained: the training script is embedded in it, nothing is uploaded.
+
+1. colab.research.google.com → File → Upload notebook → `colab_train_lora.ipynb`.
 2. Runtime → Change runtime type → **T4 GPU**.
-3. In the **Parameters** cell set `BASE`, `SUBJECT`, `HF_USER`. Keep `FOUR_BIT=False` for
-   1.5B/3B so the adapter matches the fp16 base the Mac serves; set it True only for the 7B.
-4. Runtime → **Run all**. Paste the write token when the login cell asks.
-5. If the fetch cell stops, upload `train_lora.py` through the Files panel and run the cell again.
-6. Wait. Rough times on a T4 for 2,000 examples × 2 epochs: 1.5B ≈ 40 min, 3B ≈ 1–2 h,
-   7B (QLoRA) ≈ 3–4 h. Checkpoints go to Drive every 200 steps if `USE_DRIVE` is on, so a
-   disconnected session can be resumed by re-running (the trainer picks up the last checkpoint
-   only if you pass `--resume_from_checkpoint`; simplest is to rerun from scratch for a 1.5B).
-7. The last cell prints `training_summary.json`: steps, loss, wall time, kWh and gCO₂e of the
-   training run, library versions. The same file is inside the adapter repo.
-8. Confirm the adapter appears at `https://huggingface.co/<HF_USER>/<base>-lora-<subject>`.
-
-Subjects, their training data, and where each adapter is evaluated on the Mac:
-
-| subject | trains on | evaluated on |
-|---|---|---|
-| `math` | GSM8K train, reason-then-"Answer: N" (2,000 of 7,473) | AQuA-RAT with the reasoning protocol: `dev_cot_test.py --extra qwen3b_math=Qwen/Qwen2.5-3B-Instruct@<repo>` (the main pipeline's datasets are letter-scored; AQuA is not in the bank) |
-| `code` | MBPP train (374) topped up to 2,000 from CodeAlpaca-20k Python tasks | `codemmlu` dataset in the bank (489 q, letter-scored), via `02_score_model.py` |
-| `knowledge` | MMLU auxiliary_train in the pipeline's exact letter prompt (2,000 of 99,842) | `mmlu`, `csqa`, `arc` via `02_score_model.py` |
-
-Upload `mac_pipeline/questions/questions.csv` next to the script in Colab and the trainer drops any
-training row whose question is in the evaluation bank (the auxiliary set contains ARC training
-items; 0 matches against the current bank). All three adapters are also scored on every dataset
-as the forgetting check.
+3. In **1. Parameters** set `BASE`, `SUBJECT`, `HF_USER`. Keep `FOUR_BIT` off for 1.5B/3B.
+4. Runtime → **Run all**. Approve the Drive mount; paste the token if no `HF_TOKEN` secret exists.
+5. Cell 7 streams the training output (trainable params → exclusion-filter count → loss every
+   10 steps) and also writes it to `lora_runs/<repo>/train.log` on Drive.
+   Rough times on a T4 for 2,000 examples × 2 epochs: 1.5B ≈ 40 min, 3B ≈ 1–2 h, 7B (QLoRA) ≈ 3–4 h.
+   A disconnected session is rerun from cell 7 (it restarts from step 0).
+6. Cell 8 prints `training_summary.json` (steps, loss, wall time, kWh, gCO₂e, library versions);
+   the same file is inside the adapter repo. Cell 9 re-pushes the adapter from Drive if only the
+   upload failed.
+7. Confirm the adapter at `https://huggingface.co/<HF_USER>/<base>-lora-<subject>` (private).
 
 ### C. Evaluate on the Mac
 
