@@ -35,7 +35,7 @@ import numpy as np
 import pandas as pd
 
 from common import energy
-from common.data import load_questions
+from common.data import load_questions, score_row
 from common.scorer import OptionScorer
 
 
@@ -43,8 +43,7 @@ def run_model(role, sub: pd.DataFrame, tag: str, device, no_energy: bool, idle_s
     """Score `sub` with one model inside one tracked run. Returns (rows df, summary or None)."""
     m = config.MODELS[role]
     sc = OptionScorer(m["id"], device, chat_template=m["chat_template"], adapter=m.get("adapter"))
-    r0 = sub.iloc[0]
-    sc.score(r0["question"], r0["choices"], int(r0["gold"]))          # warm-up, untracked
+    score_row(sc, sub.iloc[0])                                        # warm-up, untracked
     idle = {} if no_energy else energy.idle_baseline(idle_secs, tag)
     rows = []
     if no_energy:
@@ -54,7 +53,7 @@ def run_model(role, sub: pd.DataFrame, tag: str, device, no_energy: bool, idle_s
         ctx = energy.tracked(tag)
     with ctx as run:
         for _, r in sub.iterrows():
-            s = sc.score(r["question"], r["choices"], int(r["gold"]))
+            s = score_row(sc, r)
             rows.append(dict(id=r["id"], model=role, pred=s["pred"], correct=s["correct"],
                              graded=s["graded"], seconds=s["seconds"]))
     sc.unload()

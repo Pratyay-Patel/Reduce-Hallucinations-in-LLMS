@@ -6,6 +6,7 @@ Question bank I/O and the one prompt format every model sees.
 
 import json
 
+import numpy as np
 import pandas as pd
 
 import config
@@ -18,9 +19,31 @@ def format_prompt(question: str, choices: list) -> str:
     return f"Question: {question}\n{opts}\nAnswer:"
 
 
+def chance_of(n_options):
+    """Per-question chance accuracy: 1/k for k options, 0 for generation tasks (n_options = 0)."""
+    n = np.asarray(n_options, dtype=float)
+    return np.where(n > 0, 1.0 / np.where(n > 0, n, 1.0), 0.0)
+
+
+def is_codegen(row) -> bool:
+    return row["dataset"] == "codegen"
+
+
+def score_row(scorer, row) -> dict:
+    """Score one question-bank row with the right method for its dataset."""
+    if is_codegen(row):
+        t = row["test_code"]
+        test = json.loads(t) if isinstance(t, str) else t
+        return scorer.score_code(row["question"], test, max_new_tokens=config.CODEGEN_MAX_NEW_TOKENS,
+                                 timeout=config.CODEGEN_EXEC_TIMEOUT)
+    return scorer.score(row["question"], row["choices"], int(row["gold"]))
+
+
 def load_questions(with_split: bool = True) -> pd.DataFrame:
     q = pd.read_csv(config.QUESTIONS_CSV)
     q["choices"] = q["choices"].apply(json.loads)
+    if "test_code" not in q.columns:
+        q["test_code"] = None
     if with_split and config.SPLIT_CSV.exists():
         s = pd.read_csv(config.SPLIT_CSV)
         q = q.merge(s, on="id", how="left")

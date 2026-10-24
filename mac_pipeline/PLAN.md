@@ -28,13 +28,30 @@ scored on ARC. A full rerun is needed for the energy tables. See §7 for the una
 
 Pool = {`qwen3b`, `phi4mini`, `llama3b`}. Llama needs the gated-repo licence accepted on HF.
 
-**Datasets** (all fixed-option, scored by option likelihood, no generation):
+**Datasets** (fixed-option sets are scored by option likelihood, no generation; `codegen` is
+the one set where the models write code):
 
 | name | source | split used | n | options |
 |---|---|---|---:|---|
 | `mmlu` | `cais/mmlu`, 20 subjects × 50 | test | 1,000 | 4 |
 | `csqa` | `tau/commonsense_qa` | validation, seeded sample | 500 | 5 |
 | `arc` | `allenai/ai2_arc` ARC-Challenge | test, seeded sample | 500 | 3–5 |
+| `codemmlu` | `Fsoft-AIC/CodeMMLU`, 5 knowledge subsets × 100 | test, seeded sample | 489 | 3–5 |
+| `codegen` | `openai/openai_humaneval` (164) + `google-research-datasets/mbpp` sanitized (257) | test | 421 | none: unit tests |
+
+**`codegen` is different.** The model is given the function signature and docstring (HumanEval)
+or the task sentence plus its three asserts (MBPP), always through the chat template, and
+writes a solution (greedy, at most 512 new tokens). The first fenced code block of the reply
+is run together with the dataset's tests in a separate `python -I` process with a 10 s
+timeout; `correct` = every assert passed. Chance accuracy is 0 (`n_options` = 0), so the
+gate treats any fix of another model's failure as above chance. `graded` is
+exp(mean log-prob of the generated tokens), the model's average per-token certainty: it lives
+in (0, 1] like the letter confidence but is a different signal, and `04` picks one `tau*`
+across both. If the code rows pull `tau*` away from where the letter rows want it, the fix is
+a per-dataset `tau` (not implemented yet; the simulation in `05` will show whether it is needed).
+Generation makes these rows ~30× costlier than letter scoring: about 12 s per problem for a
+1.5B model and 25–30 s for a 3B on the Air, so 1.5–3 h per model on the 421 problems.
+Set `HUMANEVAL_N` / `MBPP_N` in `config.py` to use a seeded sample instead of all problems.
 
 MMLU subjects, 5 per group: STEM `abstract_algebra college_mathematics high_school_mathematics
 college_physics high_school_chemistry`; humanities `philosophy world_religions moral_scenarios
@@ -149,8 +166,9 @@ mac_pipeline/
   <3 options, dedups on question text.
 - Writes `questions/questions.csv` with columns
   `id, dataset, subject, source_split, question, choices (JSON list), n_options, gold (index),
-  gold_letter, prompt_text (the exact rendered prompt)`, and `questions/split.csv`
-  (`id, fold ∈ {train, test}`).
+  gold_letter, prompt_text (the exact rendered prompt), test_code (codegen only: JSON with
+  the entry point and tests, or the asserts and imports)`, and `questions/split.csv`
+  (`id, fold ∈ {train, test}`). Codegen rows have `choices = []`, `n_options = 0`, `gold = -1`.
 - Prints counts per dataset × subject × fold.
 
 ### `02_score_model.py --role R [--limit N] [--dataset D]`
@@ -158,7 +176,10 @@ mac_pipeline/
   questions (train and test) → writes `scores/R.csv`, one row per question:
   `id, dataset, subject, fold, model, chat_template, n_options, gold, pred, pred_letter,
   correct, graded, p_gold, logprobs (JSON list, one per option), prompt_tokens, seconds,
-  rendered_prompt (exact text the model saw), peak_mem_gb, energy_kwh_attr, run_id, repeat`
+  rendered_prompt (exact text the model saw), peak_mem_gb, generated, gen_tokens, truncated,
+  exec_status, exec_seconds (the last five are codegen only: the reply, its length, whether it
+  hit the token cap, pass/fail/timeout/error from the test run, and the test run's own time,
+  which is not counted in `seconds` or in the model's energy), energy_kwh_attr, run_id, repeat`
   and `energy/R_D_<repeat>.json`:
   `role, model_id, dataset, repeat, run_id, n, duration_s,
   soc_kwh, soc_cpu_kwh, soc_gpu_kwh, soc_ane_kwh, soc_mean_w, soc_samples` (powermetrics, energy
@@ -259,10 +280,12 @@ Everything after step 3 is re-runnable from the CSVs without touching a model.
 
 - `00`: any model >15 points under published MMLU on the 200 subset → fix prompt format before
   scoring 2,000. No powermetrics SoC samples → fix sudoers before anything.
-- `02`: `scores/R.csv` has 1,992 rows (993 MMLU + 500 CSQA + 499 ARC), no null `correct`,
-  per-dataset accuracy above chance for every model (the base at chance on a dataset makes its
-  confidence useless there), and no single predicted letter above ~40% on any dataset (a
-  position habit, the AQuA failure mode). `03`/`04`/`05` print a coverage warning if any role is
+- `02`: `scores/R.csv` has 2,902 rows (993 MMLU + 500 CSQA + 499 ARC + 489 CodeMMLU + 421
+  codegen), no null `correct`, per-dataset accuracy above chance for every model (the base at
+  chance on a dataset makes its confidence useless there), and no single predicted letter above
+  ~40% on any dataset (a position habit, the AQuA failure mode). For `codegen`: every row has
+  an `exec_status`, under 5% executor errors, and a pass rate above 5% (lower means the reply
+  format or the code extraction is broken, not the model). `03`/`04`/`05` print a coverage warning if any role is
   missing a dataset; do not proceed past it.
 - `03`: at least one pool pair passes both ways → hybrid is worth training. None → report
   cascade only. That is a valid paper result, not a failure.

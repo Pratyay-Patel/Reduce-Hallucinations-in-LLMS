@@ -21,6 +21,7 @@ import config  # noqa: E402
 import pandas as pd
 
 from common import energy
+from common.data import chance_of
 
 problems = []
 
@@ -60,11 +61,18 @@ def check_scores(role, datasets, repeat, limit):
             problems.append(f"{path.name}: {ds} has null `correct`")
         if len(rows) and rows["energy_kwh_attr"].isna().any():
             problems.append(f"{path.name}: {ds} has null attributed energy")
-        if len(rows):
+        if len(rows) and ds == "codegen":
+            if "exec_status" not in rows.columns or rows["exec_status"].isna().any():
+                problems.append(f"{path.name}: {ds} has rows without an exec_status (tests not run)")
+            elif (rows["exec_status"] == "error").mean() > 0.05:
+                problems.append(f"{path.name}: {ds} has {(rows['exec_status'] == 'error').mean():.0%} executor errors")
+            if rows["correct"].mean() < 0.05:
+                problems.append(f"{path.name}: {ds} pass rate {rows['correct'].mean():.3f}: generation or extraction is broken")
+        elif len(rows):
             top = rows["pred_letter"].value_counts(normalize=True)
             if top.iloc[0] > 0.45:
                 problems.append(f"{path.name}: {ds} predicts '{top.index[0]}' {top.iloc[0]:.0%} of the time (position habit)")
-            chance = (1.0 / rows["n_options"]).mean()
+            chance = float(chance_of(rows["n_options"]).mean())
             if rows["correct"].mean() < chance + 0.05:
                 problems.append(f"{path.name}: {ds} accuracy {rows['correct'].mean():.3f} is at chance ({chance:.3f})")
         e = energy.load_summary(f"{role}_{ds}_r{repeat}")

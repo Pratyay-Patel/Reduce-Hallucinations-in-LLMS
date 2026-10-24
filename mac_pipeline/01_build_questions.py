@@ -7,6 +7,7 @@ Build the question bank and the train/test split, once.
   csqa      CommonsenseQA validation, seeded sample of 500              5 options
   arc       ARC-Challenge test, seeded sample of 500                     3-5 options
   codemmlu  CodeMMLU knowledge subsets, 100 each (5 subsets)            3-4 options
+  codegen   HumanEval (164) + MBPP sanitized test (257)                  generation + unit tests
 
 Writes questions/questions.csv and questions/split.csv (70/30, stratified on dataset x subject).
 If a split.csv already exists, questions already in it keep their fold; only new ids are
@@ -107,15 +108,47 @@ def build_codemmlu():
     return rows
 
 
+def build_codegen():
+    """Code generation problems. `question` is the full text the model is asked to solve (also
+    the router's embedding text); `test_code` holds what the executor needs. choices is empty,
+    n_options 0 (chance accuracy 0), gold -1: these rows are scored by running the tests."""
+    own = np.random.default_rng(config.SEED + 3)
+    rows = []
+    ds = load_dataset("openai/openai_humaneval", split="test")
+    idx = sorted(own.choice(len(ds), min(config.HUMANEVAL_N, len(ds)), replace=False).tolist())
+    for i in idx:
+        r = ds[i]
+        prompt = r["prompt"].rstrip() + "\n"
+        question = "Complete the following Python function.\n\n```python\n" + prompt + "```"
+        rows.append(dict(id=f"codegen:humaneval:{r['task_id'].split('/')[-1]}", dataset="codegen",
+                         subject="humaneval", group="code", source_split="test", question=question,
+                         choices=[], gold=-1,
+                         test_code=json.dumps(dict(kind="humaneval", prompt=prompt,
+                                                   entry_point=r["entry_point"], test=r["test"]))))
+    ds = load_dataset("google-research-datasets/mbpp", "sanitized", split="test")
+    idx = sorted(own.choice(len(ds), min(config.MBPP_N, len(ds)), replace=False).tolist())
+    for i in idx:
+        r = ds[i]
+        asserts = [str(a) for a in r["test_list"]]
+        imports = [str(a) for a in (r["test_imports"] or [])]
+        question = (r["prompt"].strip() + "\nYour code should pass these tests:\n\n```python\n"
+                    + "\n".join(asserts) + "\n```")
+        rows.append(dict(id=f"codegen:mbpp:{r['task_id']}", dataset="codegen", subject="mbpp",
+                         group="code", source_split="test", question=question, choices=[], gold=-1,
+                         test_code=json.dumps(dict(kind="mbpp", imports=imports, asserts=asserts))))
+    return rows
+
+
 def main():
-    rows = build_mmlu() + build_csqa() + build_arc() + build_codemmlu()
+    rows = build_mmlu() + build_csqa() + build_arc() + build_codemmlu() + build_codegen()
     q = pd.DataFrame(rows)
     before = len(q)
     q = q.drop_duplicates("question").reset_index(drop=True)
     q["n_options"] = q["choices"].apply(len)
-    q["gold_letter"] = q["gold"].apply(lambda g: LETTERS[g])
-    q["prompt_text"] = [format_prompt(a, b) for a, b in zip(q["question"], q["choices"])]
+    q["gold_letter"] = q["gold"].apply(lambda g: LETTERS[g] if g >= 0 else "")
+    q["prompt_text"] = [format_prompt(a, b) if b else a for a, b in zip(q["question"], q["choices"])]
     q["choices"] = q["choices"].apply(json.dumps)
+    q["test_code"] = q["test_code"].where(q["test_code"].notna(), "")
 
     # keep existing fold assignments; split only ids not seen before
     old = pd.read_csv(config.SPLIT_CSV) if config.SPLIT_CSV.exists() else pd.DataFrame(columns=["id", "fold"])
@@ -130,7 +163,7 @@ def main():
     print(f"kept folds for {len(q) - len(new_idx)} existing ids; assigned {len(new_idx)} new ids")
 
     cols = ["id", "dataset", "subject", "group", "source_split", "question", "choices",
-            "n_options", "gold", "gold_letter", "prompt_text"]
+            "n_options", "gold", "gold_letter", "prompt_text", "test_code"]
     q[cols].to_csv(config.QUESTIONS_CSV, index=False)
     split.to_csv(config.SPLIT_CSV, index=False)
 

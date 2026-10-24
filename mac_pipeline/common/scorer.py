@@ -12,6 +12,7 @@ Zero generated tokens, so no parsing failures and ~0.3-1 s per question.
 import gc
 import time
 
+import numpy as np
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -141,6 +142,48 @@ class OptionScorer:
             rendered_prompt=self.tok.decode(ids[0], skip_special_tokens=False),
             seconds=time.perf_counter() - t0,
             peak_mem_gb=self.peak_mem_gb(),
+        )
+
+    # ------------------------------------------------------------------ generate code, run tests
+    CODE_INSTRUCTION = "Reply with the complete solution in a single ```python code block and nothing else."
+
+    @torch.inference_mode()
+    def score_code(self, question: str, test: dict, max_new_tokens: int = 512, timeout: float = 10.0) -> dict:
+        """Generate a Python solution (greedy, bounded) and run the dataset's unit tests on it.
+        Always uses the chat template: instruct models write code in that format. `correct` is
+        1 when every test passes. `graded` is exp(mean log-prob of the generated tokens): the
+        model's average per-token certainty, in (0, 1] like the letter confidence, but a
+        different signal; see PLAN.md. Columns pred/pred_letter/p_gold have no meaning here."""
+        from common.execute import check_solution
+        t0 = time.perf_counter()
+        msgs = [{"role": "user", "content": question + chr(10) * 2 + self.CODE_INSTRUCTION}]
+        enc = self.tok.apply_chat_template(msgs, add_generation_prompt=True, enable_thinking=False,
+                                           return_tensors="pt", return_dict=True)
+        ids = (enc["input_ids"] if hasattr(enc, "keys") else enc).to(self.device)
+        out = self.model.generate(ids, max_new_tokens=max_new_tokens, do_sample=False,
+                                  pad_token_id=self.tok.pad_token_id,
+                                  output_scores=True, return_dict_in_generate=True)
+        gen_ids = out.sequences[0, ids.shape[1]:]
+        n_gen = int(gen_ids.shape[0])
+        # per-token log-prob of the greedy choice, over the generated tokens (EOS included)
+        lp = self.model.compute_transition_scores(out.sequences, out.scores, normalize_logits=True)[0, :n_gen]
+        lp = lp[torch.isfinite(lp)].float()
+        mean_lp = float(lp.mean()) if lp.numel() else float("nan")
+        text = self.tok.decode(gen_ids, skip_special_tokens=True)
+        if self.device == "mps":
+            torch.mps.synchronize()
+        gen_s = time.perf_counter() - t0
+        r = check_solution(text, test, timeout=timeout)
+        return dict(
+            pred=-1, pred_letter="", correct=int(r["status"] == "pass"),
+            graded=float(np.exp(mean_lp)) if mean_lp == mean_lp else 0.0, p_gold=float("nan"),
+            logprobs=[], prompt_tokens=int(ids.shape[1]),
+            rendered_prompt=self.tok.decode(ids[0], skip_special_tokens=False),
+            seconds=gen_s,                               # model time only; the test run is not energy of the model
+            exec_seconds=time.perf_counter() - t0 - gen_s,
+            peak_mem_gb=self.peak_mem_gb(),
+            generated=text, gen_tokens=n_gen, truncated=int(n_gen >= max_new_tokens),
+            mean_token_logprob=mean_lp, exec_status=r["status"], exec_stderr=r["stderr"],
         )
 
     def score(self, question: str, choices: list, gold: int) -> dict:

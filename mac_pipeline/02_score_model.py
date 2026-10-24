@@ -1,8 +1,9 @@
 """
 mac_pipeline/02_score_model.py
 ------------------------------
-Score one model on every question (train and test) with option-likelihood scoring, one
-CodeCarbon-tracked run per dataset, energy attributed per question by share of wall time.
+Score one model on every question (train and test) with option-likelihood scoring (the
+`codegen` dataset instead generates code and runs its unit tests), one tracked run per
+dataset, energy attributed per question by share of wall time.
 
   python mac_pipeline/02_score_model.py --role base
   python mac_pipeline/02_score_model.py --role phi4mini --dataset mmlu
@@ -27,7 +28,7 @@ import numpy as np
 import pandas as pd
 
 from common import energy
-from common.data import load_questions, subset
+from common.data import chance_of, load_questions, score_row, subset
 from common.scorer import OptionScorer
 
 
@@ -66,8 +67,7 @@ def main():
         tag = f"{role}_{ds}_r{args.repeat}"
 
         # warm-up (not tracked): first call pays kernel compilation on MPS
-        r0 = sub.iloc[0]
-        scorer.score(r0["question"], r0["choices"], int(r0["gold"]))
+        score_row(scorer, sub.iloc[0])
 
         idle = {} if args.no_energy else energy.idle_baseline(args.idle_secs, tag)
         scorer.reset_peak()
@@ -79,16 +79,21 @@ def main():
             ctx = energy.tracked(f"score_{tag}")
         with ctx as run:
             for k, (_, r) in enumerate(sub.iterrows()):
-                s = scorer.score(r["question"], r["choices"], int(r["gold"]))
+                s = score_row(scorer, r)
                 rows.append(dict(id=r["id"], dataset=ds, subject=r["subject"], fold=r.get("fold"),
-                                 model=role, chat_template=int(ct), n_options=int(r["n_options"]),
+                                 model=role, chat_template=int(ct if ds != "codegen" else True),
+                                 n_options=int(r["n_options"]),
                                  gold=int(r["gold"]), pred=s["pred"], pred_letter=s["pred_letter"],
                                  correct=s["correct"], graded=s["graded"], p_gold=s["p_gold"],
                                  logprobs=json.dumps(s["logprobs"]), prompt_tokens=s["prompt_tokens"],
                                  rendered_prompt=s["rendered_prompt"],
                                  seconds=s["seconds"], peak_mem_gb=s["peak_mem_gb"],
+                                 # codegen only: the reply, its length, and what the test run said
+                                 generated=s.get("generated"), gen_tokens=s.get("gen_tokens"),
+                                 truncated=s.get("truncated"), exec_status=s.get("exec_status"),
+                                 exec_seconds=s.get("exec_seconds"),
                                  energy_kwh_attr=np.nan, run_id=None, repeat=args.repeat))
-                if (k + 1) % 100 == 0:
+                if (k + 1) % (20 if ds == "codegen" else 100) == 0:
                     acc = np.mean([x["correct"] for x in rows])
                     print(f"  {ds}: {k + 1}/{len(sub)}  acc {acc:.3f}  "
                           f"{np.mean([x['seconds'] for x in rows]):.2f} s/q", flush=True)
@@ -113,7 +118,11 @@ def main():
                   f"CodeCarbon {summ['total_kwh'] * 1000:.3f} Wh")
         else:
             print(f"  {ds}: n={len(df)} acc={df['correct'].mean():.3f}  (energy not tracked)")
-        chance = (1.0 / df["n_options"]).mean()
+        chance = float(chance_of(df["n_options"]).mean())
+        if ds == "codegen":
+            print(f"  {ds}: pass {df['correct'].mean():.3f}  truncated {df['truncated'].mean():.1%}  "
+                  f"status {df['exec_status'].value_counts().to_dict()}  "
+                  f"mean {df['gen_tokens'].mean():.0f} tokens")
         if df["correct"].mean() < chance + 0.05:
             print(f"  WARNING: {role} is at chance on {ds} ({df['correct'].mean():.3f} vs {chance:.3f}); "
                   f"its confidence there is noise.")

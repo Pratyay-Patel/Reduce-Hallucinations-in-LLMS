@@ -76,7 +76,14 @@ ARC_N = 500
 # mental execution and are left out), 100 per subset, seeded sample
 CODEMMLU_SUBSETS = ["api_frameworks", "dbms_sql", "programming_syntax", "software_principles", "others"]
 CODEMMLU_PER_SUBSET = 100
-DATASETS = ["mmlu", "csqa", "arc", "codemmlu"]
+# Code generation: HumanEval (164) + MBPP sanitized test (257). Scored by running the unit
+# tests on the generated code, not by option letters; confidence = exp(mean token log-prob
+# of the generated code). The only dataset that makes the models generate.
+HUMANEVAL_N = 164                         # 164 = all
+MBPP_N = 257                              # 257 = all of the sanitized test split
+CODEGEN_MAX_NEW_TOKENS = 512
+CODEGEN_EXEC_TIMEOUT = 10                 # seconds per test program
+DATASETS = ["mmlu", "csqa", "arc", "codemmlu", "codegen"]
 # AQuA-RAT was the third dataset in the first Mac run (Results_Run1). Letter-likelihood scoring
 # cannot do multi-step arithmetic: three of four models sat at chance with a 60-75% position
 # habit. Replaced by CommonsenseQA, which needs knowledge/judgement, not calculation.

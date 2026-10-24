@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import binomtest
 
-from common.data import load_scores, pivot_scores
+from common.data import chance_of, load_scores, pivot_scores
 
 ALPHA = 0.05
 MC = 20000
@@ -37,10 +37,12 @@ def chance_test(hits: int, ks: np.ndarray, seed: int = 0):
     n = len(ks)
     if n == 0:
         return np.nan, np.nan
-    p = 1.0 / ks
+    p = chance_of(ks)                      # 0 for generation questions (n_options = 0)
     expected = float(p.sum())
+    if expected == 0.0:                    # guessing never passes a unit test
+        return 0.0, (0.0 if hits > 0 else 1.0)
     if np.all(ks == ks[0]):
-        return expected, binomtest(hits, n, 1.0 / ks[0], alternative="greater").pvalue
+        return expected, binomtest(hits, n, float(p[0]), alternative="greater").pvalue
     rng = np.random.default_rng(seed)
     draws = (rng.random((MC, n)) < p).sum(axis=1)
     return expected, float((draws >= hits).mean())
@@ -128,7 +130,7 @@ def main():
     for ds in config.DATASETS:
         s = scores[(scores.model == config.BASE) & (scores.fold == "train") & (scores.dataset == ds)]
         if len(s):
-            acc, ch = s.correct.mean(), (1 / s.n_options).mean()
+            acc, ch = s.correct.mean(), float(chance_of(s.n_options).mean())
             flag = "OK" if acc > ch + 0.05 else "AT CHANCE -- confidence there is noise"
             lines.append(f"- {ds}: base {acc:.3f} vs chance {ch:.3f}  {flag}")
     (config.RESULTS_DIR / "gate.md").write_text("\n".join(lines), encoding="utf-8")
