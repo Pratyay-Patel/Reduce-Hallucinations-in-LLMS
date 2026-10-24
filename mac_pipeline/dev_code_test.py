@@ -50,21 +50,31 @@ def main():
         q = q.sample(args.limit, random_state=config.SEED).sort_index()
     dev = config.pick_device()
     print(f"{len(q)} CodeMMLU questions, device {dev}", flush=True)
-    rows = []
+    out_csv = os.path.join(args.out, "code_test.csv")
+    # resume: rows already in the output file are kept, so a stopped run loses at most SAVE_EVERY questions
+    rows = pd.read_csv(out_csv).to_dict("records") if os.path.exists(out_csv) else []
+    done = {(x["model"], int(x["chat"]), x["id"]) for x in rows}
+    SAVE_EVERY = 25
     for role in args.models:
         for chat in (False, True):
+            todo = [r for _, r in q.iterrows() if (role, int(chat), r["id"]) not in done]
+            if not todo:
+                print(f"{role:<16} {'chat' if chat else 'raw ':<5} already done", flush=True)
+                continue
             eb = args.eight_bit_3b and role == "qwen3b"
             sc = make_scorer(MODELS[role], dev, chat, eb)
             t0 = time.time()
-            for k, r in q.iterrows():
+            for n, r in enumerate(todo, 1):
                 s = sc.score(r["question"], r["choices"], int(r["gold"]))
                 rows.append(dict(id=r["id"], subject=r["subject"], model=role, chat=int(chat), eight_bit=int(eb),
                                  gold=r["gold"], pred=s["pred"], correct=s["correct"], graded=s["graded"],
                                  seconds=s["seconds"]))
+                if n % SAVE_EVERY == 0:
+                    pd.DataFrame(rows).to_csv(out_csv, index=False)
             sub = [x for x in rows if x["model"] == role and x["chat"] == int(chat)]
             print(f"{role:<16} {'chat' if chat else 'raw ':<5} acc {np.mean([x['correct'] for x in sub]):.3f}  "
                   f"{np.mean([x['seconds'] for x in sub]):.2f} s/q  ({time.time() - t0:.0f}s)", flush=True)
-            pd.DataFrame(rows).to_csv(os.path.join(args.out, "code_test.csv"), index=False)
+            pd.DataFrame(rows).to_csv(out_csv, index=False)
             sc.unload()
     df = pd.DataFrame(rows)
     print("\n=== accuracy by model x format ===")
