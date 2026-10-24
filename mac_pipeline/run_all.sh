@@ -2,9 +2,18 @@
 # mac_pipeline/run_all.sh -- the whole pipeline, unattended, on the Mac.
 #
 #   cd <repo>                      # the directory that contains mac_pipeline/
-#   bash mac_pipeline/run_all.sh               # full rerun: every model x every dataset (~5-6 h)
+#   bash mac_pipeline/run_all.sh               # full rerun: every model x every dataset (~30 h, see below)
 #   MODE=minimal bash mac_pipeline/run_all.sh  # only what Results_Run1 lacks: csqa x 4, llama3b arc (~1 h)
 #   bash mac_pipeline/run_all.sh resume        # skip steps that already finished (markers in logs/done/)
+#
+# Running in sessions (to let the machine cool): Ctrl-C at any time, later run with `resume`.
+# Only the step that was interrupted is redone; every finished step has a marker in logs/done/.
+# Steps are sized so the longest (one 3B model on the 421 codegen problems) is ~3 h:
+#   session 1  00 + letter-scored datasets x 4 models + energy repeats       ~9 h
+#   session 2  codegen (generation + unit tests) x 4 models                  ~11 h
+#   session 3  gate/router/simulate (minutes) + end-to-end configurations    ~11 h
+# E2E="hybrid cascade:qwen3b base single:qwen3b" bash mac_pipeline/run_all.sh resume
+#   limits the end-to-end step to those configurations (default: all eight, ~11 h).
 #
 # Before the first run, once:
 #   sudo visudo        ->  <user> ALL = (root) NOPASSWD: /usr/bin/powermetrics
@@ -128,10 +137,14 @@ cooldown
 
 # ------------------------------------------------------------------ scoring
 if [[ "$MODE" == "full" ]]; then
+  # letter-scored datasets in one step per model (~40 min base, ~1.5 h per 3B); codegen in its
+  # own step per model (~1.5 h base, ~3 h per 3B) so an interrupted session loses at most one
+  LETTER=(); GEN=()
+  for d in "${DATASETS[@]}"; do [[ "$d" == "codegen" ]] && GEN+=("$d") || LETTER+=("$d"); done
   for role in "${ROLES[@]}"; do
-    step "02_score_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset "${DATASETS[@]}" \
+    step "02_score_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset "${LETTER[@]}" \
       || fail_hard "scoring $role"
-    check "02_score_$role" scores --role "$role" --datasets "${DATASETS[@]}" || fail_hard "scores for $role incomplete"
+    check "02_score_$role" scores --role "$role" --datasets "${LETTER[@]}" || fail_hard "scores for $role incomplete"
     cooldown
   done
   for k in $(seq 1 "$REPEATS"); do
@@ -139,6 +152,14 @@ if [[ "$MODE" == "full" ]]; then
       step "02_repeat${k}_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset mmlu --limit 200 --repeat "$k" \
         || log "repeat $k for $role failed; continuing"
       check "02_repeat${k}_$role" scores --role "$role" --datasets mmlu --repeat "$k" --limit 200 || log "repeat $k for $role incomplete; continuing"
+      cooldown
+    done
+  done
+  for role in "${ROLES[@]}"; do
+    for d in "${GEN[@]}"; do
+      step "02_score_${role}_$d" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset "$d" \
+        || fail_hard "scoring $role $d"
+      check "02_score_${role}_$d" scores --role "$role" --datasets "$d" || fail_hard "$d scores for $role incomplete"
       cooldown
     done
   done
@@ -173,10 +194,14 @@ check 05_simulate simulate                                      || fail_hard "si
 # ------------------------------------------------------------------ end-to-end (measured)
 # every configuration, so the paper can pick: hybrid, each plain cascade, the base alone,
 # each pool model alone. A failure here does not stop the others.
-E2E=(hybrid)
-for p in "${POOL[@]}"; do E2E+=("cascade:$p"); done
-E2E+=(base)
-for p in "${POOL[@]}"; do E2E+=("single:$p"); done
+if [[ -n "${E2E:-}" ]]; then
+  read -r -a E2E <<< "$E2E"
+else
+  E2E=(hybrid)
+  for p in "${POOL[@]}"; do E2E+=("cascade:$p"); done
+  E2E+=(base)
+  for p in "${POOL[@]}"; do E2E+=("single:$p"); done
+fi
 TAU_STAR="$("$PYTHON" -c "import json;print(f\"{json.load(open('mac_pipeline/router/thresholds.json'))['tau_star']:.2f}\")")"
 for cfg in "${E2E[@]}"; do
   name="06_e2e_${cfg//:/-}"
