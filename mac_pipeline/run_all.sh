@@ -9,11 +9,17 @@
 # Running in sessions (to let the machine cool): Ctrl-C at any time, later run with `resume`.
 # Only the step that was interrupted is redone; every finished step has a marker in logs/done/.
 # Measured in Results_Run2 (1,992 questions, 4 models); the longest single step is ~80 min:
-#   session 1  00 (~1 h) + scoring x 4 models (~4 h) + energy repeats (~1.3 h) + cooldowns   ~7 h
+#   session 1  00 (seconds) + scoring x 4 models (~4 h) + cooldowns                          ~4.5 h
 #   session 2  gate/router/simulate (minutes) + 8 end-to-end configurations (~3 h) + cooldowns ~4 h
 # E2E="hybrid cascade:qwen3b base single:qwen3b" bash mac_pipeline/run_all.sh resume
 #   limits the end-to-end step to those configurations (default: all eight).
 # COOLDOWN=0 disables the 5 min idle sleep between model runs.
+# CHECK_MODELS=1 makes 00 re-score 200 MMLU questions per model in raw and chat format to
+#   re-choose the prompt format (~1 h). Off by default: the choices from Results_Run2 are in
+#   config.py; turn it on only after changing a model or the prompt.
+# REPEATS=3 adds back-to-back energy repeats on 200 MMLU questions (~1.3 h). Off by default:
+#   Results_Run2 showed back-to-back repeats agree to 1% while runs hours apart differ 30-44%,
+#   so the between-run spread is taken from the end-to-end passes instead (07, Table 4).
 #
 # Before the first run, once:
 #   sudo visudo        ->  <user> ALL = (root) NOPASSWD: /usr/bin/powermetrics
@@ -30,7 +36,8 @@ set -uo pipefail
 # ------------------------------------------------------------------ settings
 MODE="${MODE:-full}"                  # full | minimal
 COOLDOWN="${COOLDOWN:-300}"           # seconds of idle between model runs (thermal reset)
-REPEATS="${REPEATS:-3}"               # energy repeats on the 200-question MMLU subset
+REPEATS="${REPEATS:-0}"               # back-to-back energy repeats on 200 MMLU questions (0 = none)
+CHECK_MODELS="${CHECK_MODELS:-0}"     # 1 = re-choose raw vs chat prompt per model in 00 (~1 h)
 PYTHON="${PYTHON:-python3}"
 # roles, pool and datasets come from config.py so adapter roles / new datasets need no edit here
 _cfg() { "$PYTHON" -c "import sys; sys.path.insert(0, 'mac_pipeline'); import config; print(' '.join(config.$1))"; }
@@ -97,7 +104,7 @@ notify() {
 fail_hard() { log "STOPPING: $1"; notify "run stopped: $1"; exit 1; }
 
 # ------------------------------------------------------------------ preflight
-log "mode=$MODE  cooldown=${COOLDOWN}s  repeats=$REPEATS  python=$($PYTHON --version 2>&1)"
+log "mode=$MODE  cooldown=${COOLDOWN}s  repeats=$REPEATS  check_models=$CHECK_MODELS  python=$($PYTHON --version 2>&1)"
 [[ "$(uname)" == "Darwin" ]] || fail_hard "this script is for the Mac"
 
 if ! sudo -n powermetrics --samplers cpu_power -n 1 -i 100 >/dev/null 2>&1; then
@@ -127,13 +134,14 @@ EOF
 step 01_build_questions "$PYTHON" mac_pipeline/01_build_questions.py || fail_hard "question bank"
 check 01_build_questions questions || fail_hard "question bank outputs"
 
-# environment + energy check + prompt-format choice (writes config_overrides.json)
-if [[ "$MODE" == "full" ]]; then
+# environment + energy check (seconds); with CHECK_MODELS=1 also the prompt-format choice
+# per model on 200 MMLU questions (writes config_overrides.json, ~1 h)
+if [[ "$MODE" == "full" && "$CHECK_MODELS" == "1" ]]; then
   step 00_check_env "$PYTHON" mac_pipeline/00_check_env.py || fail_hard "environment check"
+  cooldown
 else
   step 00_check_env_light "$PYTHON" mac_pipeline/00_check_env.py --skip-models || fail_hard "environment check"
 fi
-cooldown
 
 # ------------------------------------------------------------------ scoring
 if [[ "$MODE" == "full" ]]; then

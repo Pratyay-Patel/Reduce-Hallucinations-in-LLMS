@@ -113,8 +113,11 @@ would be noise. Therefore:
 showed the fanless Air at "Heavy" thermal pressure with seconds/question rising 30–50% within
 a 3B run and idle at ~11.5 W against 17–21 W mean; report both.
 
-**Repeats.** One full run of everything, plus **3 repeats of the 200-question MMLU subset per
-model** to give an energy standard deviation for the tables.
+**Repeats.** Dropped (Oct 24). Run2 had 3 back-to-back repeats of 200 MMLU questions per
+model; they agreed with each other to 1% but ran at ~2× the power of the main run, so the ±
+they gave was not the real run-to-run spread (30–44% between runs hours apart). The spread is
+now read from the end-to-end passes, which score the same models on the same test questions
+hours after the scoring step (`07`, Table 4). `REPEATS=3` in `run_all.sh` brings them back.
 
 ---
 
@@ -234,7 +237,7 @@ The live measurement, on the test split, with the deployed decision rule:
 ### `07_report.py`
 Builds the paper tables from `results/`:
 - **Table 1** per-model accuracy per dataset and overall; kWh, gCO₂e, seconds per 1,000
-  questions; ± from the 3 repeats.
+  questions (± from repeats only if `REPEATS` > 0).
 - **Table 2** gate matrix (12 ordered pairs).
 - **Table 3** end-to-end: always-base, always-best-single, plain cascade, hybrid, oracle;
   accuracy, energy, emissions, escalation rate, Δ vs best single, Δ vs cost-matched random.
@@ -252,10 +255,10 @@ the tables only.
 
 | step | script | wall time (est.) |
 |---|---|---:|
-| 1 | `00_check_env.py` | 20 min |
+| 1 | `00_check_env.py --skip-models` | seconds (1 h with `CHECK_MODELS=1`) |
 | 2 | `01_build_questions.py` | 2 min |
-| 3 | `02_score_model.py` × 4 | ~2.5 h |
-| 4 | `02_score_model.py --limit 200` × 4 × 3 repeats | ~40 min |
+| 3 | `02_score_model.py` × 4 | ~4 h (Run2 measured) |
+| 4 | energy repeats | dropped (`REPEATS=3` to restore, ~1.3 h) |
 | 5 | `03_gate.py` | seconds |
 | 6 | `04_train_router.py` | 5 min |
 | 7 | `05_simulate.py` | seconds |
@@ -314,13 +317,11 @@ huggingface-cli login                      # Llama-3.2 is a gated repo; accept i
 sudo visudo                                # add: <user> ALL = (root) NOPASSWD: /usr/bin/powermetrics
 
 python mac_pipeline/01_build_questions.py                  # 1,992 questions + 70/30 split (already committed)
-python mac_pipeline/00_check_env.py                        # env, energy, 200-q format check per model
+python mac_pipeline/00_check_env.py --skip-models          # env + energy check; drop the flag to redo the prompt-format choice (~1 h)
 python mac_pipeline/02_score_model.py --role base
 python mac_pipeline/02_score_model.py --role qwen3b
 python mac_pipeline/02_score_model.py --role phi4mini
 python mac_pipeline/02_score_model.py --role llama3b
-for k in 1 2 3; do for r in base qwen3b phi4mini llama3b; do
-  python mac_pipeline/02_score_model.py --role $r --dataset mmlu --limit 200 --repeat $k; done; done
 python mac_pipeline/03_gate.py                             # decision: hybrid or cascade-only
 python mac_pipeline/04_train_router.py
 python mac_pipeline/05_simulate.py
