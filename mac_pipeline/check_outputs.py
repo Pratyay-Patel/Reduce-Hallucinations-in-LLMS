@@ -69,12 +69,16 @@ def check_scores(role, datasets, repeat, limit):
             if rows["correct"].mean() < 0.05:
                 problems.append(f"{path.name}: {ds} pass rate {rows['correct'].mean():.3f}: generation or extraction is broken")
         elif len(rows):
+            # a specialist (the math model) is expected to be at chance off its subject; that is
+            # the router's problem, not a broken run. Fatal only for the base and escalation roles.
+            fatal = role in (config.BASE, config.ESCALATION)
+            flag = problems.append if fatal else (lambda msg: print("  WARNING:", msg))
             top = rows["pred_letter"].value_counts(normalize=True)
             if top.iloc[0] > 0.45:
-                problems.append(f"{path.name}: {ds} predicts '{top.index[0]}' {top.iloc[0]:.0%} of the time (position habit)")
+                flag(f"{path.name}: {ds} predicts '{top.index[0]}' {top.iloc[0]:.0%} of the time (position habit)")
             chance = float(chance_of(rows["n_options"]).mean())
             if rows["correct"].mean() < chance + 0.05:
-                problems.append(f"{path.name}: {ds} accuracy {rows['correct'].mean():.3f} is at chance ({chance:.3f})")
+                flag(f"{path.name}: {ds} accuracy {rows['correct'].mean():.3f} is at chance ({chance:.3f})")
             if ds in config.COT_DATASETS and "truncated" in rows.columns and rows["truncated"].mean() > 0.5:
                 print(f"  WARNING: {ds} reasoning hit the {config.COT_MAX_NEW_TOKENS}-token cap on "
                       f"{rows['truncated'].mean():.0%} of questions; consider a higher COT_MAX_NEW_TOKENS")

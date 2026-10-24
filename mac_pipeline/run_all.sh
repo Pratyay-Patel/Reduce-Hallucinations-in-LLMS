@@ -3,7 +3,6 @@
 #
 #   cd <repo>                      # the directory that contains mac_pipeline/
 #   bash mac_pipeline/run_all.sh               # full rerun: every model x every dataset (~11 h, see below)
-#   MODE=minimal bash mac_pipeline/run_all.sh  # only what Results_Run1 lacks: csqa x 4, llama3b arc (~1 h)
 #   bash mac_pipeline/run_all.sh resume        # skip steps that already finished (markers in logs/done/)
 #
 # Running in sessions (to let the machine cool): Ctrl-C at any time, later run with `resume`.
@@ -27,7 +26,6 @@
 #
 # Before the first run, once:
 #   sudo visudo        ->  <user> ALL = (root) NOPASSWD: /usr/bin/powermetrics
-#   huggingface-cli login   (Llama-3.2 is gated)
 #   plug in, lid open, brightness fixed, close other apps. The script keeps the Mac and the
 #   display awake with caffeinate; do not let the display sleep mid-run, it changes idle power.
 #
@@ -38,17 +36,10 @@
 set -uo pipefail
 
 # ------------------------------------------------------------------ settings
-MODE="${MODE:-full}"                  # full | minimal
 COOLDOWN="${COOLDOWN:-300}"           # seconds of idle between model runs (thermal reset)
 REPEATS="${REPEATS:-0}"               # back-to-back energy repeats on 200 MMLU questions (0 = none)
 CHECK_MODELS="${CHECK_MODELS:-0}"     # 1 = re-choose raw vs chat prompt per model in 00 (~1 h)
 PYTHON="${PYTHON:-python3}"
-# roles, pool and datasets come from config.py so adapter roles / new datasets need no edit here
-_cfg() { "$PYTHON" -c "import sys; sys.path.insert(0, 'mac_pipeline'); import config; print(' '.join(config.$1))"; }
-read -r -a ROLES    <<< "$(_cfg ALL_ROLES)"
-read -r -a POOL     <<< "$(_cfg POOL)"
-read -r -a DATASETS <<< "$(_cfg DATASETS)"
-
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(cd "$HERE/.." && pwd)"
 cd "$REPO"
@@ -56,6 +47,14 @@ if [[ -z "${VIRTUAL_ENV:-}" && -f "$REPO/.venv/bin/activate" ]]; then
   # shellcheck disable=SC1091
   source "$REPO/.venv/bin/activate"
 fi
+
+# roles, pool and datasets come from config.py so new roles / datasets need no edit here.
+# Read after cd + venv so the import works from any calling directory and any python.
+_cfg() { "$PYTHON" -c "import sys; sys.path.insert(0, 'mac_pipeline'); import config; print(' '.join(config.$1))"; }
+read -r -a ROLES    <<< "$(_cfg ALL_ROLES)"
+read -r -a POOL     <<< "$(_cfg POOL)"
+read -r -a DATASETS <<< "$(_cfg DATASETS)"
+[[ ${#ROLES[@]} -gt 0 && ${#DATASETS[@]} -gt 0 ]] || { echo "could not read roles/datasets from mac_pipeline/config.py" >&2; exit 1; }
 
 LOGS="$HERE/logs"; DONE="$LOGS/done"; mkdir -p "$LOGS" "$DONE"
 STAMP="$(date +%Y%m%d_%H%M%S)"
@@ -108,7 +107,7 @@ notify() {
 fail_hard() { log "STOPPING: $1"; notify "run stopped: $1"; exit 1; }
 
 # ------------------------------------------------------------------ preflight
-log "mode=$MODE  cooldown=${COOLDOWN}s  repeats=$REPEATS  check_models=$CHECK_MODELS  python=$($PYTHON --version 2>&1)"
+log "cooldown=${COOLDOWN}s  repeats=$REPEATS  check_models=$CHECK_MODELS  python=$($PYTHON --version 2>&1)"
 [[ "$(uname)" == "Darwin" ]] || fail_hard "this script is for the Mac"
 
 if ! sudo -n powermetrics --samplers cpu_power -n 1 -i 100 >/dev/null 2>&1; then
@@ -140,7 +139,7 @@ check 01_build_questions questions || fail_hard "question bank outputs"
 
 # environment + energy check (seconds); with CHECK_MODELS=1 also the prompt-format choice
 # per model on 200 MMLU questions (writes config_overrides.json, ~1 h)
-if [[ "$MODE" == "full" && "$CHECK_MODELS" == "1" ]]; then
+if [[ "$CHECK_MODELS" == "1" ]]; then
   step 00_check_env "$PYTHON" mac_pipeline/00_check_env.py || fail_hard "environment check"
   cooldown
 else
@@ -148,41 +147,21 @@ else
 fi
 
 # ------------------------------------------------------------------ scoring
-if [[ "$MODE" == "full" ]]; then
-  # one step per model over every dataset (~40 min base, ~75 min per 3B in Results_Run2)
-  for role in "${ROLES[@]}"; do
-    step "02_score_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset "${DATASETS[@]}" \
-      || fail_hard "scoring $role"
-    check "02_score_$role" scores --role "$role" --datasets "${DATASETS[@]}" || fail_hard "scores for $role incomplete"
-    cooldown
-  done
-  for k in $(seq 1 "$REPEATS"); do
-    for role in "${ROLES[@]}"; do
-      step "02_repeat${k}_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset mmlu --limit 200 --repeat "$k" \
-        || log "repeat $k for $role failed; continuing"
-      check "02_repeat${k}_$role" scores --role "$role" --datasets mmlu --repeat "$k" --limit 200 || log "repeat $k for $role incomplete; continuing"
-      cooldown
-    done
-  done
-else
-  # minimal: the pieces Results_Run1 does not have. Existing scores/*.csv must already be in
-  # mac_pipeline/scores/ (copy them from Results_Run1 first).
-  for role in base qwen3b phi4mini; do
-    [[ -f "mac_pipeline/scores/$role.csv" ]] || fail_hard "minimal mode needs mac_pipeline/scores/$role.csv from Results_Run1"
-    step "02_score_${role}_csqa" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset csqa \
-      || fail_hard "scoring $role csqa"
-    check "02_score_${role}_csqa" scores --role "$role" --datasets csqa || fail_hard "csqa scores for $role incomplete"
-    cooldown
-  done
-  step "02_score_llama3b_csqa_arc" "$PYTHON" mac_pipeline/02_score_model.py --role llama3b --dataset csqa arc \
-    || fail_hard "scoring llama3b"
-  check "02_score_llama3b_csqa_arc" scores --role llama3b --datasets csqa arc || fail_hard "llama3b scores incomplete"
-  # every role must now cover every dataset before the analysis steps
-  for role in "${ROLES[@]}"; do
-    check "02_coverage_$role" scores --role "$role" --datasets "${DATASETS[@]}" || fail_hard "$role does not cover every dataset"
-  done
+# one step per model over every dataset (~40 min base, ~75 min per 3B in Results_Run2)
+for role in "${ROLES[@]}"; do
+  step "02_score_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset "${DATASETS[@]}" \
+    || fail_hard "scoring $role"
+  check "02_score_$role" scores --role "$role" --datasets "${DATASETS[@]}" || fail_hard "scores for $role incomplete"
   cooldown
-fi
+done
+for k in $(seq 1 "$REPEATS"); do
+  for role in "${ROLES[@]}"; do
+    step "02_repeat${k}_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset mmlu --limit 200 --repeat "$k" \
+      || log "repeat $k for $role failed; continuing"
+    check "02_repeat${k}_$role" scores --role "$role" --datasets mmlu --repeat "$k" --limit 200 || log "repeat $k for $role incomplete; continuing"
+    cooldown
+  done
+done
 
 # ------------------------------------------------------------------ analysis (seconds)
 step 03_gate         "$PYTHON" mac_pipeline/03_gate.py         || fail_hard "gate"

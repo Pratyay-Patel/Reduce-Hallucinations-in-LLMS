@@ -208,19 +208,21 @@ def main():
          md_table(T4, fmt={"tau": "{:.2f}", "wh_measured": "{:.2f}", "wh_simulated": "{:.2f}", "energy_gap": pct}),
          "", "Figures: `frontier.png` (from 05_simulate), `fig2_per_dataset.png`.", ""]
     if len(T4) and (T4.energy_gap.abs() > 0.10).any():
-        L.append("**Check:** at least one configuration's measured energy differs from the attributed "
-                 "estimate by more than 10 %. Re-check idle baselines and attribution before reporting.")
+        L.append("**Note:** at least one configuration's measured energy differs from the attributed "
+                 "estimate by more than 10 %. On the fanless Air the same model's power drifts 30-44 % "
+                 "between runs hours apart (Results_Run2), so this gap mixes attribution error with "
+                 "power drift; report it as the between-run spread, not as a validation failure.")
     (config.RESULTS_DIR / "report.md").write_text("\n".join(L), encoding="utf-8")
 
     try:
         with pd.ExcelWriter(config.RESULTS_DIR / "results.xlsx", engine="openpyxl") as xw:
-            T1.to_excel(xw, "T1 models", index=False)
-            T2.to_excel(xw, "T2 gate", index=False)
-            T3.to_excel(xw, "T3 end-to-end", index=False)
-            T4.to_excel(xw, "T4 sim vs measured", index=False)
+            T1.to_excel(xw, sheet_name="T1 models", index=False)
+            T2.to_excel(xw, sheet_name="T2 gate", index=False)
+            T3.to_excel(xw, sheet_name="T3 end-to-end", index=False)
+            T4.to_excel(xw, sheet_name="T4 sim vs measured", index=False)
             p = config.RESULTS_DIR / "simulated.csv"
             if p.exists():
-                pd.read_csv(p).to_excel(xw, "simulated sweep", index=False)
+                pd.read_csv(p).to_excel(xw, sheet_name="simulated sweep", index=False)
         print("wrote results/results.xlsx")
     except Exception as e:
         print("xlsx skipped:", e)

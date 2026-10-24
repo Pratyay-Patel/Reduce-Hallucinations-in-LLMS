@@ -123,6 +123,8 @@ def choose_tau(conf, c_route, c_esc):
         esc = conf < tau
         acc = np.where(esc, c_esc, c_route).mean() if len(conf) else np.nan
         sweep.append(dict(tau=tau, escalated=float(esc.mean()) if len(conf) else np.nan, acc=float(acc)))
+    if len(conf) == 0:                     # a route the OOF router never picked
+        return sweep, None
     inner = [s for s in sweep if 0 < s["escalated"] < 1]
     best = max(inner or sweep, key=lambda s: (round(s["acc"], 4), -s["escalated"]))
     return sweep, best["tau"]
@@ -268,6 +270,10 @@ def main():
     for j, r in enumerate(routed):
         conf_pick[pick == j] = CONF[r][pick == j]
     g_sweep, tau_global = choose_tau(conf_pick, c_pick, C[esc_role])
+    for r in routed:                       # a never-picked route falls back to the global tau
+        if tau_per_route[r] is None:
+            tau_per_route[r] = tau_global
+            lines.append(f"(route -> {r} was never picked on train; its tau falls back to the global tau)")
     # plain cascade: generalist alone first, no router
     p_sweep, tau_cascade = choose_tau(CONF[config.BASE], C[config.BASE], C[esc_role])
     lines += [f"### one global tau for route-then-cascade: tau* = {tau_global}", "",
@@ -278,8 +284,8 @@ def main():
     lines += [f"| {s['tau']:.2f} | {s['escalated']:.1%} | {s['acc']:.3f} |" for s in p_sweep]
 
     # summary of the train-split decision rule
-    acc_rc = np.mean([np.where(CONF[r][pick == j] < tau_per_route[r], C[esc_role][pick == j], C[r][pick == j]).sum()
-                      for j, r in enumerate(routed)]) * len(routed) / n
+    acc_rc = sum(np.where(CONF[r][pick == j] < tau_per_route[r], C[esc_role][pick == j], C[r][pick == j]).sum()
+                 for j, r in enumerate(routed)) / n
     lines += ["", "## Train-split summary (OOF)", "",
               f"- route only (no escalation): {c_pick.mean():.3f}",
               f"- route then cascade, per-route tau: {acc_rc:.3f}",

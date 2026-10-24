@@ -305,8 +305,23 @@ Everything after step 3 is re-runnable from the CSVs without touching a model.
   missing a dataset; do not proceed past it.
 - `03`: at least one pool pair passes both ways → hybrid is worth training. None → report
   cascade only. That is a valid paper result, not a failure.
-- `05` vs `06`: simulated and measured end-to-end energy within ~10 %. Larger gap → the
-  attribution or the idle baseline is wrong; fix before reporting.
+- `05` vs `06`: simulated and measured end-to-end energy are compared in Table 4. A gap is
+  not by itself an attribution error: the same model's power drifts 30–44 % between runs hours
+  apart on the fanless Air (Run2), so the gap is reported as the between-run spread. Only a gap
+  far outside that range points at the idle baseline or the attribution.
+- Not counted anywhere: model loading (the scorer is built before tracking starts). A deployment
+  that keeps three models resident pays it once; one that loads per query pays it every time.
+  The paper states this.
+- The gate and the router act largely on dataset identity (maths vs the rest). `05` therefore
+  reports the trivial router "reasoning datasets → math, everything else → generalist" next to
+  the learned one, and how often the two agree. The learned router earns its place only if it
+  beats that line, e.g. by sending MMLU STEM questions to the math model.
+- The tau sweep tables and the "cheapest point matching each single" line in `05` pick tau on
+  test; they are descriptive. The headline rows use the taus chosen on train, carry paired
+  bootstrap CIs, and flag degenerate points (0 % or 100 % escalation).
+- One tau per route pools two confidence regimes on the generalist route (letter softmax on
+  MMLU/CSQA/ARC, post-reasoning softmax on AQuA). If the per-dataset escalation rates in `05`
+  show the AQuA rows all on one side, the next step is a tau per route × scoring protocol.
 - Every routed configuration is compared to the cost-matched random line. Below the line means
   the router's decisions cost more than they earn; say so.
 

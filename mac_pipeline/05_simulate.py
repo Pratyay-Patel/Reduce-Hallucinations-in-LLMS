@@ -7,6 +7,7 @@ for every configuration:
   singles            each model alone
   oracle             best of the routed tier / best of all models, per question
   route-only         router picks a routed model; no escalation
+  route-by-dataset   the trivial router: reasoning datasets -> math, everything else -> generalist
   cascade X->ESC     X answers; confidence < tau -> escalation model      (tau grid)
   route-cascade      router picks; confidence < tau -> escalation model  (tau grid, and per-route tau*)
   random             cost-matched random mixing of single models (upper hull)
@@ -117,12 +118,23 @@ def main():
     c_pick, e_pick, conf_pick = stack[pick, ar], stackE[pick, ar], stackConf[pick, ar]
 
     rows = []
+    rng = np.random.default_rng(config.SEED)
+    boot_idx = rng.integers(0, n, size=(2000, n))          # one set of paired resamples for every CI
+
+    def paired_ci(a_vec, b_vec):
+        """95% bootstrap CI of mean(a - b) over questions, paired."""
+        d = np.asarray(a_vec, float) - np.asarray(b_vec, float)
+        m = d[boot_idx].mean(axis=1)
+        return float(np.percentile(m, 2.5)), float(np.percentile(m, 97.5))
 
     def add(name, kind, acc_vec, kwh_vec, tau=None, esc=None, extra=None):
-        d = dict(config=name, kind=kind, tau=tau, escalated=None if esc is None else float(esc.mean()),
-                 acc=float(acc_vec.mean()), kwh_per_q=float(kwh_vec.mean()),
-                 gco2e_per_q=float(kwh_vec.mean() * gfac) if gfac == gfac else np.nan,
-                 wh_per_1000=float(kwh_vec.mean() * 1e6), n=n)
+        e = None if esc is None else float(esc.mean())
+        d = dict(config=name, kind=kind, tau=tau, escalated=e,
+                 degenerate=(e is not None and kind in ("cascade", "route-cascade", "route-cascade*")
+                             and (e == 0.0 or e == 1.0)),
+                 acc=float(acc_vec.mean()), kwh_per_q=float(np.mean(kwh_vec)),
+                 gco2e_per_q=float(np.mean(kwh_vec) * gfac) if gfac == gfac else np.nan,
+                 wh_per_1000=float(np.mean(kwh_vec) * 1e6), n=n)
         for ds in config.DATASETS:
             m = ds_of == ds
             d[f"acc_{ds}"] = float(acc_vec[m].mean()) if m.any() else np.nan
@@ -133,13 +145,26 @@ def main():
 
     for r in roles:
         add(f"always-{r}", "single", C[r], Ekwh[r])
-    add("oracle-routed", "oracle", stack.max(axis=0), stackE.mean(axis=0))
-    add("oracle-all", "oracle", np.maximum(stack.max(axis=0), C[esc_role]), Ekwh[base])
+    nan_e = np.full(n, np.nan)                               # an oracle has no energy of its own
+    add("oracle-routed", "oracle", stack.max(axis=0), nan_e)
+    add("oracle-all", "oracle", np.maximum(stack.max(axis=0), C[esc_role]), nan_e)
     singles = [(C[r].mean(), Ekwh[r].mean()) for r in roles]
     best_single = max(roles, key=lambda r: C[r].mean())
+    best_vec = C[best_single]
     split = json.dumps({routed[j]: int((pick == j).sum()) for j in range(len(routed))})
     add("route-only", "route", c_pick, e_pick + router_kwh_q, tau=0.0, esc=np.zeros(n, bool),
-        extra=dict(split=split, acc_random_cost=random_at_cost((e_pick + router_kwh_q).mean(), singles)))
+        extra=dict(split=split, acc_random_cost=random_at_cost((e_pick + router_kwh_q).mean(), singles),
+                   d_vs_best_ci=paired_ci(c_pick, best_vec)))
+    # the trivial router a reviewer will ask about: dataset identity decides the route
+    if "math" in routed and len(config.COT_DATASETS):
+        j_math, j_gen = routed.index("math"), routed.index(base)
+        pick_ds = np.where(np.isin(ds_of, config.COT_DATASETS), j_math, j_gen)
+        c_ds, e_ds = stack[pick_ds, ar], stackE[pick_ds, ar]
+        add("route-by-dataset", "route", c_ds, e_ds, tau=0.0, esc=np.zeros(n, bool),
+            extra=dict(split=json.dumps({routed[j]: int((pick_ds == j).sum()) for j in range(len(routed))}),
+                       acc_random_cost=random_at_cost(e_ds.mean(), singles),
+                       d_vs_best_ci=paired_ci(c_ds, best_vec),
+                       agrees_with_router=float((pick_ds == pick).mean())))
 
     for tau in config.TAU_GRID:
         for x in routed:                                   # plain cascades, no router
@@ -149,14 +174,16 @@ def main():
             f = esc.mean()
             add(f"cascade {x}->{esc_role}", "cascade", acc, kwh, tau, esc,
                 dict(first=x, acc_random_rate=(1 - f) * C[x].mean() + f * C[esc_role].mean(),
-                     acc_random_cost=random_at_cost(kwh.mean(), singles)))
+                     acc_random_cost=random_at_cost(kwh.mean(), singles),
+                     d_vs_best_ci=paired_ci(acc, best_vec)))
         esc = conf_pick < tau                              # route then cascade, one global tau
         acc = np.where(esc, C[esc_role], c_pick)
         kwh = router_kwh_q + e_pick + np.where(esc, Ekwh[esc_role], 0.0)
         f = esc.mean()
         add("route-cascade", "route-cascade", acc, kwh, tau, esc,
             dict(acc_random_rate=(1 - f) * c_pick.mean() + f * C[esc_role].mean(),
-                 acc_random_cost=random_at_cost(kwh.mean(), singles), split=split))
+                 acc_random_cost=random_at_cost(kwh.mean(), singles), split=split,
+                 d_vs_best_ci=paired_ci(acc, best_vec)))
     # route then cascade with the per-route tau chosen on train
     tau_vec = np.array([tau_route[routed[j]] for j in pick])
     esc = conf_pick < tau_vec
@@ -166,7 +193,10 @@ def main():
     add("route-cascade*", "route-cascade*", acc, kwh, None, esc,
         dict(acc_random_rate=(1 - f) * c_pick.mean() + f * C[esc_role].mean(),
              acc_random_cost=random_at_cost(kwh.mean(), singles), split=split,
-             tau_per_route=json.dumps(tau_route)))
+             tau_per_route=json.dumps(tau_route), d_vs_best_ci=paired_ci(acc, best_vec),
+             d_vs_cascade_ci=paired_ci(acc, np.where(CONF[base] < tau_cascade, C[esc_role], C[base])),
+             escalated_per_dataset=json.dumps({ds: round(float(esc[ds_of == ds].mean()), 3)
+                                               for ds in config.DATASETS if (ds_of == ds).any()})))
 
     R = pd.DataFrame(rows)
     R.to_csv(config.RESULTS_DIR / "simulated.csv", index=False)
@@ -182,12 +212,16 @@ def main():
     for _, r in R[R.kind.isin(["single", "oracle", "route"])].iterrows():
         L.append(f"| {r.config} | {r.acc:.3f} | " + " | ".join(f"{r[f'acc_{d}']:.3f}" for d in config.DATASETS)
                  + f" | {r.wh_per_1000:.2f} | {r.gco2e_per_q:.4f} |")
-    L += ["", f"Router picks on test: {split}", "",
-          f"## Headline configurations (tau chosen on train: per-route {tau_route}, global {tau_global}, "
+    rbd = R[R.config == "route-by-dataset"]
+    L += ["", f"Router picks on test: {split}" +
+          (f"; the dataset-identity router agrees with it on {rbd.iloc[0].agrees_with_router:.0%} of questions" if len(rbd) else ""),
+          "", f"## Headline configurations (tau chosen on train: per-route {tau_route}, global {tau_global}, "
           f"plain cascade {tau_cascade})", "",
-          "| config | tau | escalated | acc | " + " | ".join(f"acc {d}" for d in config.DATASETS) +
-          " | vs best single | vs random (cost) | Wh / 1000 q | vs best single energy |",
-          "|---|---:|---:|---:|" + "---:|" * len(config.DATASETS) + "---:|---:|---:|---:|"]
+          "`vs best single` carries a 95% paired-bootstrap CI over test questions. "
+          "`degenerate` = escalates 0% or 100%: not a routing result (PLAN §6).", "",
+          "| config | tau | escalated | degenerate | acc | " + " | ".join(f"acc {d}" for d in config.DATASETS) +
+          " | vs best single [95% CI] | vs random (cost) | Wh / 1000 q | vs best single energy |",
+          "|---|---:|---:|---|---:|" + "---:|" * len(config.DATASETS) + "---:|---:|---:|---:|"]
     head = pd.concat([
         R[R.kind == "route-cascade*"],
         R[(R.kind == "route-cascade") & np.isclose(R.tau.astype(float), tau_global)],
@@ -195,10 +229,16 @@ def main():
         R[R.kind == "route"]])
     for _, r in head.iterrows():
         tau_s = "per-route" if r.kind == "route-cascade*" else f"{r.tau:.2f}"
-        L.append(f"| {r.config} | {tau_s} | {r.escalated:.1%} | {r.acc:.3f} | " +
+        lo, hi = r.d_vs_best_ci if isinstance(r.d_vs_best_ci, tuple) else (np.nan, np.nan)
+        L.append(f"| {r.config} | {tau_s} | {r.escalated:.1%} | {'YES' if r.degenerate else '-'} | {r.acc:.3f} | " +
                  " | ".join(f"{r[f'acc_{d}']:.3f}" for d in config.DATASETS) +
-                 f" | {r.acc - bs.acc:+.3f} | {r.acc - r.acc_random_cost:+.3f} | {r.wh_per_1000:.2f} | "
+                 f" | {r.acc - bs.acc:+.3f} [{lo:+.3f}, {hi:+.3f}] | {r.acc - r.acc_random_cost:+.3f} | {r.wh_per_1000:.2f} | "
                  f"{(r.kwh_per_q - bs.kwh_per_q) / bs.kwh_per_q:+.0%} |")
+    s_rc = R[R.kind == "route-cascade*"].iloc[0]
+    lo, hi = s_rc.d_vs_cascade_ci
+    L += ["", f"route-cascade (per-route tau) minus plain cascade {base}->{esc_role} (tau {tau_cascade}): "
+          f"{s_rc.acc - R[(R.config == f'cascade {base}->{esc_role}') & np.isclose(R.tau.astype(float), tau_cascade)].iloc[0].acc:+.3f} "
+          f"[{lo:+.3f}, {hi:+.3f}] paired 95% CI; escalation per dataset {s_rc.escalated_per_dataset}"]
     L += ["", "## Full tau sweep", "", "| config | tau | escalated | acc | vs random (cost) | Wh / 1000 q |",
           "|---|---:|---:|---:|---:|---:|"]
     for _, r in R[R.kind.isin(["cascade", "route-cascade"])].sort_values(["config", "tau"]).iterrows():
