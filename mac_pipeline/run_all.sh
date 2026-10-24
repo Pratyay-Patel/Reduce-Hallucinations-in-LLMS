@@ -2,18 +2,18 @@
 # mac_pipeline/run_all.sh -- the whole pipeline, unattended, on the Mac.
 #
 #   cd <repo>                      # the directory that contains mac_pipeline/
-#   bash mac_pipeline/run_all.sh               # full rerun: every model x every dataset (~30 h, see below)
+#   bash mac_pipeline/run_all.sh               # full rerun: every model x every dataset (~11 h, see below)
 #   MODE=minimal bash mac_pipeline/run_all.sh  # only what Results_Run1 lacks: csqa x 4, llama3b arc (~1 h)
 #   bash mac_pipeline/run_all.sh resume        # skip steps that already finished (markers in logs/done/)
 #
 # Running in sessions (to let the machine cool): Ctrl-C at any time, later run with `resume`.
 # Only the step that was interrupted is redone; every finished step has a marker in logs/done/.
-# Steps are sized so the longest (one 3B model on the 421 codegen problems) is ~3 h:
-#   session 1  00 + letter-scored datasets x 4 models + energy repeats       ~9 h
-#   session 2  codegen (generation + unit tests) x 4 models                  ~11 h
-#   session 3  gate/router/simulate (minutes) + end-to-end configurations    ~11 h
+# Measured in Results_Run2 (1,992 questions, 4 models); the longest single step is ~80 min:
+#   session 1  00 (~1 h) + scoring x 4 models (~4 h) + energy repeats (~1.3 h) + cooldowns   ~7 h
+#   session 2  gate/router/simulate (minutes) + 8 end-to-end configurations (~3 h) + cooldowns ~4 h
 # E2E="hybrid cascade:qwen3b base single:qwen3b" bash mac_pipeline/run_all.sh resume
-#   limits the end-to-end step to those configurations (default: all eight, ~11 h).
+#   limits the end-to-end step to those configurations (default: all eight).
+# COOLDOWN=0 disables the 5 min idle sleep between model runs.
 #
 # Before the first run, once:
 #   sudo visudo        ->  <user> ALL = (root) NOPASSWD: /usr/bin/powermetrics
@@ -137,14 +137,11 @@ cooldown
 
 # ------------------------------------------------------------------ scoring
 if [[ "$MODE" == "full" ]]; then
-  # letter-scored datasets in one step per model (~40 min base, ~1.5 h per 3B); codegen in its
-  # own step per model (~1.5 h base, ~3 h per 3B) so an interrupted session loses at most one
-  LETTER=(); GEN=()
-  for d in "${DATASETS[@]}"; do [[ "$d" == "codegen" ]] && GEN+=("$d") || LETTER+=("$d"); done
+  # one step per model over every dataset (~40 min base, ~75 min per 3B in Results_Run2)
   for role in "${ROLES[@]}"; do
-    step "02_score_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset "${LETTER[@]}" \
+    step "02_score_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset "${DATASETS[@]}" \
       || fail_hard "scoring $role"
-    check "02_score_$role" scores --role "$role" --datasets "${LETTER[@]}" || fail_hard "scores for $role incomplete"
+    check "02_score_$role" scores --role "$role" --datasets "${DATASETS[@]}" || fail_hard "scores for $role incomplete"
     cooldown
   done
   for k in $(seq 1 "$REPEATS"); do
@@ -152,14 +149,6 @@ if [[ "$MODE" == "full" ]]; then
       step "02_repeat${k}_$role" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset mmlu --limit 200 --repeat "$k" \
         || log "repeat $k for $role failed; continuing"
       check "02_repeat${k}_$role" scores --role "$role" --datasets mmlu --repeat "$k" --limit 200 || log "repeat $k for $role incomplete; continuing"
-      cooldown
-    done
-  done
-  for role in "${ROLES[@]}"; do
-    for d in "${GEN[@]}"; do
-      step "02_score_${role}_$d" "$PYTHON" mac_pipeline/02_score_model.py --role "$role" --dataset "$d" \
-        || fail_hard "scoring $role $d"
-      check "02_score_${role}_$d" scores --role "$role" --datasets "$d" || fail_hard "$d scores for $role incomplete"
       cooldown
     done
   done

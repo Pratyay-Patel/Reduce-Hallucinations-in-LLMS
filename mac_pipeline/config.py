@@ -72,18 +72,17 @@ MMLU_SUBJECTS = {
 MMLU_PER_SUBJECT = 50
 CSQA_N = 500                              # CommonsenseQA validation (1,221 labelled), seeded sample
 ARC_N = 500
-# CodeMMLU knowledge-style subsets (letter-scorable; the execution/completion/repair subsets need
-# mental execution and are left out), 100 per subset, seeded sample
+# Code datasets, not in the workflow (Oct 24 decision): the 1.5B coder specialist scored
+# below the 1.5B generalist on CodeMMLU's knowledge subsets, and code generation costs ~30x a
+# letter score. The builders and the generate-and-test scorer are kept; add "codemmlu" and/or
+# "codegen" back to DATASETS and rerun 01 to use them.
 CODEMMLU_SUBSETS = ["api_frameworks", "dbms_sql", "programming_syntax", "software_principles", "others"]
 CODEMMLU_PER_SUBSET = 100
-# Code generation: HumanEval (164) + MBPP sanitized test (257). Scored by running the unit
-# tests on the generated code, not by option letters; confidence = exp(mean token log-prob
-# of the generated code). The only dataset that makes the models generate.
 HUMANEVAL_N = 164                         # 164 = all
 MBPP_N = 257                              # 257 = all of the sanitized test split
 CODEGEN_MAX_NEW_TOKENS = 512
 CODEGEN_EXEC_TIMEOUT = 10                 # seconds per test program
-DATASETS = ["mmlu", "csqa", "arc", "codemmlu", "codegen"]
+DATASETS = ["mmlu", "csqa", "arc"]
 # AQuA-RAT was the third dataset in the first Mac run (Results_Run1). Letter-likelihood scoring
 # cannot do multi-step arithmetic: three of four models sat at chance with a 60-75% position
 # habit. Replaced by CommonsenseQA, which needs knowledge/judgement, not calculation.

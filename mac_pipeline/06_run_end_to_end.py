@@ -83,7 +83,7 @@ def main():
 
     device = args.device or config.pick_device()
     q = load_questions()
-    test = q[q["fold"] == "test"].reset_index(drop=True)
+    test = q[(q["fold"] == "test") & q["dataset"].isin(config.DATASETS)].reset_index(drop=True)
     if args.limit:
         test = test.head(args.limit)
     n = len(test)

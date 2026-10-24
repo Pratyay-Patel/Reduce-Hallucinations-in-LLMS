@@ -9,6 +9,7 @@ Build the question bank and the train/test split, once.
   codemmlu  CodeMMLU knowledge subsets, 100 each (5 subsets)            3-4 options
   codegen   HumanEval (164) + MBPP sanitized test (257)                  generation + unit tests
 
+Only the datasets listed in config.DATASETS are built.
 Writes questions/questions.csv and questions/split.csv (70/30, stratified on dataset x subject).
 If a split.csv already exists, questions already in it keep their fold; only new ids are
 assigned, so swapping one dataset never disturbs what has already been scored.
@@ -139,9 +140,19 @@ def build_codegen():
     return rows
 
 
+BUILDERS = {"mmlu": build_mmlu, "csqa": build_csqa, "arc": build_arc,
+            "codemmlu": build_codemmlu, "codegen": build_codegen}
+
+
 def main():
-    rows = build_mmlu() + build_csqa() + build_arc() + build_codemmlu() + build_codegen()
+    # build order is fixed (mmlu, csqa, arc share/seed generators in that order), not DATASETS order
+    rows = []
+    for name, fn in BUILDERS.items():
+        if name in config.DATASETS:
+            rows += fn()
     q = pd.DataFrame(rows)
+    if "test_code" not in q.columns:
+        q["test_code"] = ""
     before = len(q)
     q = q.drop_duplicates("question").reset_index(drop=True)
     q["n_options"] = q["choices"].apply(len)
