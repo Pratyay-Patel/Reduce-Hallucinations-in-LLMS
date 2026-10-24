@@ -1,23 +1,24 @@
 """
 mac_pipeline/06_run_end_to_end.py
 ---------------------------------
-The live measurement: run the deployed decision rule on the TEST split with CodeCarbon on.
+The live measurement: run the deployed decision rule on the TEST split with energy tracked.
 
-  pass 1  base model on every test question            -> confidence, escalation set
-  router  embed the escalated questions, pick a pool member (hybrid only)
-  pass 2  each pool model on the questions assigned to it, one model at a time
+  router pass   embed every test question, pick a routed 1.5B model        (route* configs)
+  pass 1        each routed model on the questions assigned to it
+  pass 2        the escalation model on the questions whose first answer was below tau
 
 End-to-end energy = sum of the tracked passes. Questions are grouped by model rather than
-interleaved per query because all four models resident would need ~23 GB; the per-question
+interleaved per query because every model resident at once would not fit; the per-question
 computation is identical.
 
-  python mac_pipeline/06_run_end_to_end.py --config hybrid                 # tau* from train
-  python mac_pipeline/06_run_end_to_end.py --config hybrid --tau 0.7
-  python mac_pipeline/06_run_end_to_end.py --config cascade:qwen3b
-  python mac_pipeline/06_run_end_to_end.py --config base                   # tau = 0 anchor
-  python mac_pipeline/06_run_end_to_end.py --config single:phi4mini        # always-X anchor
+  python mac_pipeline/06_run_end_to_end.py --config route-cascade        # per-route tau from train
+  python mac_pipeline/06_run_end_to_end.py --config route-cascade --tau 0.9   # one global tau
+  python mac_pipeline/06_run_end_to_end.py --config route                 # router only, no escalation
+  python mac_pipeline/06_run_end_to_end.py --config cascade:qwen3b        # generalist -> qwen3b, no router
+  python mac_pipeline/06_run_end_to_end.py --config base                  # generalist alone
+  python mac_pipeline/06_run_end_to_end.py --config single:qwen3b         # always-X anchor
 
-Outputs results/end_to_end_<config>_<tau>.json and ..._log.csv
+Outputs results/end_to_end_<config>.json and ..._log.csv  (':' in the config becomes '-')
 """
 
 import argparse
@@ -72,9 +73,11 @@ def run_model(role, sub: pd.DataFrame, tag: str, device, no_energy: bool, idle_s
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="hybrid",
-                    help="hybrid | cascade:<pool role> | base | single:<role>")
-    ap.add_argument("--tau", type=float, default=None, help="default: tau* from router/thresholds.json")
+    ap.add_argument("--config", default="route-cascade",
+                    help="route-cascade | route | cascade:<role> | base | single:<role>")
+    ap.add_argument("--tau", type=float, default=None,
+                    help="override: one global tau (default: per-route tau from thresholds.json for "
+                         "route-cascade, tau_cascade for cascade:X)")
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--idle-secs", type=int, default=config.IDLE_SECS)
     ap.add_argument("--no-energy", action="store_true")
@@ -89,57 +92,58 @@ def main():
     n = len(test)
     cfg = args.config
     kind, _, arg = cfg.partition(":")
-    pool = config.POOL
+    routed, esc_role = config.ROUTED, config.ESCALATION
+    thr_path = config.ROUTER_DIR / "thresholds.json"
+    thr = json.loads(thr_path.read_text()) if thr_path.exists() else {}
 
-    if kind == "hybrid":
-        tau = args.tau if args.tau is not None else json.loads(
-            (config.ROUTER_DIR / "thresholds.json").read_text())["tau_star"]
+    tau_per_route = None
+    if kind == "route-cascade":
+        if args.tau is not None:
+            tau_per_route = {r: args.tau for r in routed}
+        else:
+            tau_per_route = thr["tau_per_route"]
+        tau = args.tau
+    elif kind == "route":
+        tau = 0.0
     elif kind == "cascade":
-        tau = args.tau if args.tau is not None else json.loads(
-            (config.ROUTER_DIR / "thresholds.json").read_text())["tau_star"]
-        assert arg in pool, f"cascade target must be one of {pool}"
+        assert arg in config.MODELS, f"cascade target must be a role, got {arg}"
+        tau = args.tau if args.tau is not None else thr["tau_cascade"]
     elif kind == "base":
         tau = 0.0
     elif kind == "single":
-        tau = 1.01
         assert arg in config.MODELS
+        tau = 1.01
     else:
         sys.exit(f"unknown config {cfg}")
-    name = f"{cfg.replace(':', '-')}_{tau:.2f}"
-    print(f"config={cfg}  tau={tau}  n={n}  device={device}")
+    name = cfg.replace(":", "-")
+    print(f"config={cfg}  tau={tau if tau is not None else tau_per_route}  n={n}  device={device}")
 
     log = test[["id", "dataset", "subject", "n_options", "gold"]].copy()
+    log["first_model"] = config.BASE
+    log["first_pred"], log["first_correct"], log["first_conf"] = np.nan, np.nan, np.nan
+    log["tau_used"] = tau if tau is not None else np.nan
+    log["escalated"] = False
+    log["router_kwh_attr"], log["first_kwh_attr"], log["pool_kwh_attr"] = 0.0, 0.0, 0.0
+    for r in routed:
+        log[f"router_p_{r}"] = np.nan
     passes = {}
     t0 = time.time()
 
-    # ---- pass 1: base (or the single model)
     if kind == "single":
         df, summ = run_model(arg, test, f"e2e_{name}_{arg}", device, args.no_energy, args.idle_secs)
         passes[arg] = summ
-        log["base_pred"], log["base_correct"], log["base_conf"] = np.nan, np.nan, np.nan
+        log["first_model"] = arg
         log["escalated"] = True
         log["chosen_model"] = arg
         log["final_pred"], log["final_correct"] = df["pred"].values, df["correct"].values
-        log["base_kwh_attr"], log["router_kwh_attr"], log["pool_kwh_attr"] = 0.0, 0.0, df["kwh_attr"].values
+        log["pool_kwh_attr"] = df["kwh_attr"].values
     else:
-        df, summ = run_model(config.BASE, test, f"e2e_{name}_base", device, args.no_energy, args.idle_secs)
-        passes[config.BASE] = summ
-        log["base_pred"], log["base_correct"], log["base_conf"] = df["pred"].values, df["correct"].values, df["graded"].values
-        log["base_kwh_attr"] = df["kwh_attr"].values
-        log["escalated"] = log["base_conf"] < tau
-        log["router_kwh_attr"], log["pool_kwh_attr"] = 0.0, 0.0
-        for r in pool:
-            log[f"router_p_{r}"] = np.nan
-        esc = log[log["escalated"]]
-        print(f"base acc {log['base_correct'].mean():.3f}   escalating {len(esc)}/{n} ({len(esc) / n:.1%})")
-
-        # ---- router pass (hybrid only)
-        if kind == "hybrid" and len(esc):
+        # ---- router pass (route* configs): ex-ante, from the question text
+        if kind in ("route", "route-cascade"):
             with open(config.ROUTER_DIR / "router.pkl", "rb") as f:
                 router = pickle.load(f)
             from sentence_transformers import SentenceTransformer
-            texts = test.loc[esc.index, "prompt_text"].tolist()
-            conf = esc["base_conf"].values.reshape(-1, 1)
+            texts = test["prompt_text"].tolist()
             if args.no_energy:
                 from contextlib import nullcontext
                 ctx = nullcontext({"data": {}})
@@ -149,42 +153,56 @@ def main():
                 E = SentenceTransformer(config.ROUTER_EMBEDDER).encode(
                     texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
                 P = np.vstack([router["models"][r]["clf"].predict_proba(
-                    router["models"][r]["scaler"].transform(
-                        np.hstack([conf, router["models"][r]["pca"].transform(E)])))[:, 1]
-                    for r in pool])
+                    router["models"][r]["scaler"].transform(router["models"][r]["pca"].transform(E)))[:, 1]
+                    for r in routed])
             if not args.no_energy:
                 rs = energy.summarize_run(run, role="router", model_id=config.ROUTER_EMBEDDER,
-                                          dataset="e2e", repeat=0, n=len(esc), idle={})
+                                          dataset="e2e", repeat=0, n=n, idle={})
                 energy.write_summary(rs, f"e2e_{name}_router")
                 passes["router"] = rs
-                log.loc[esc.index, "router_kwh_attr"] = energy.record_kwh(rs) / len(esc)
-            for j, r in enumerate(pool):
-                log.loc[esc.index, f"router_p_{r}"] = P[j]
-            log.loc[esc.index, "chosen_model"] = [pool[k] for k in P.argmax(axis=0)]
-        elif kind == "cascade":
-            log.loc[esc.index, "chosen_model"] = arg
-        log.loc[~log["escalated"], "chosen_model"] = config.BASE
-        log["final_pred"], log["final_correct"] = log["base_pred"], log["base_correct"]
+                log["router_kwh_attr"] = energy.record_kwh(rs) / n
+            for j, r in enumerate(routed):
+                log[f"router_p_{r}"] = P[j]
+            log["first_model"] = [routed[k] for k in P.argmax(axis=0)]
+            if tau_per_route is not None:
+                log["tau_used"] = log["first_model"].map(tau_per_route)
+            print("router picks:", log["first_model"].value_counts().to_dict())
 
-        # ---- pass 2: each pool model on its assigned questions
-        for r in pool:
-            idx = log.index[log["chosen_model"] == r]
-            if len(idx) == 0:
-                continue
-            sub = test.loc[idx]
-            df, summ = run_model(r, sub, f"e2e_{name}_{r}", device, args.no_energy, args.idle_secs)
+        # ---- pass 1: each routed model on its questions (base/cascade: the generalist on all)
+        for r in sorted(log["first_model"].unique()):
+            idx = log.index[log["first_model"] == r]
+            df, summ = run_model(r, test.loc[idx], f"e2e_{name}_{r}", device, args.no_energy, args.idle_secs)
             passes[r] = summ
-            log.loc[idx, "final_pred"] = df["pred"].values
-            log.loc[idx, "final_correct"] = df["correct"].values
-            log.loc[idx, "pool_kwh_attr"] = df["kwh_attr"].values
+            log.loc[idx, "first_pred"], log.loc[idx, "first_correct"] = df["pred"].values, df["correct"].values
+            log.loc[idx, "first_conf"], log.loc[idx, "first_kwh_attr"] = df["graded"].values, df["kwh_attr"].values
             print(f"  {r}: {len(idx)} questions, acc there {df['correct'].mean():.3f}")
 
-    log["total_kwh_attr"] = log["base_kwh_attr"] + log["router_kwh_attr"] + log["pool_kwh_attr"]
+        # ---- escalation decision
+        if kind in ("route-cascade", "cascade"):
+            log["escalated"] = log["first_conf"] < log["tau_used"]
+        log["chosen_model"] = np.where(log["escalated"], esc_role, log["first_model"])
+        log["final_pred"], log["final_correct"] = log["first_pred"], log["first_correct"]
+        esc = log.index[log["escalated"]]
+        print(f"first-pass acc {log['first_correct'].mean():.3f}   escalating {len(esc)}/{n} ({len(esc) / n:.1%})")
+
+        # ---- pass 2: the escalation model on the escalated questions
+        if len(esc):
+            target = esc_role if kind != "cascade" else arg
+            df, summ = run_model(target, test.loc[esc], f"e2e_{name}_{target}", device, args.no_energy, args.idle_secs)
+            passes[target] = summ
+            log.loc[esc, "final_pred"], log.loc[esc, "final_correct"] = df["pred"].values, df["correct"].values
+            log.loc[esc, "pool_kwh_attr"] = df["kwh_attr"].values
+            log.loc[esc, "chosen_model"] = target
+            print(f"  {target}: {len(esc)} questions, acc there {df['correct'].mean():.3f}")
+
+    log["total_kwh_attr"] = log["router_kwh_attr"] + log["first_kwh_attr"] + log["pool_kwh_attr"]
     log.to_csv(config.RESULTS_DIR / f"end_to_end_{name}_log.csv", index=False)
 
     total_kwh = float(sum(energy.record_kwh(p) for p in passes.values() if p))
     gco2 = float(sum((energy.emissions_g(p) or 0.0) for p in passes.values() if p))
-    out = dict(config=cfg, tau=tau, n=n, accuracy=float(log["final_correct"].mean()),
+    out = dict(config=cfg, tau=tau, tau_per_route=tau_per_route, n=n,
+               accuracy=float(log["final_correct"].mean()),
+               first_pass_accuracy=float(log["first_correct"].mean()) if log["first_correct"].notna().any() else None,
                escalation_rate=float(log["escalated"].mean()),
                total_kwh=total_kwh, wh_per_1000=total_kwh / n * 1e6, gco2e=gco2, gco2e_per_q=gco2 / n,
                wall_s=time.time() - t0,
@@ -194,12 +212,14 @@ def main():
                              "record_kwh": energy.record_kwh(v) if v else None}
                          for k, v in passes.items()},
                per_dataset={ds: dict(acc=float(g["final_correct"].mean()), n=int(len(g)),
-                                     escalated=float(g["escalated"].mean()))
+                                     escalated=float(g["escalated"].mean()),
+                                     routed=g["first_model"].value_counts().to_dict())
                             for ds, g in log.groupby("dataset")},
+               routed_split=log["first_model"].value_counts().to_dict(),
                chosen_split=log["chosen_model"].value_counts().to_dict(),
                timestamp=datetime.now(timezone.utc).isoformat())
     (config.RESULTS_DIR / f"end_to_end_{name}.json").write_text(json.dumps(out, indent=2))
-    print(f"\n{cfg} tau={tau}: acc {out['accuracy']:.3f}  escalated {out['escalation_rate']:.1%}  "
+    print(f"\n{cfg}: acc {out['accuracy']:.3f}  escalated {out['escalation_rate']:.1%}  "
           f"{out['wh_per_1000']:.2f} Wh/1000q  {gco2:.2f} gCO2e  ({out['wall_s'] / 60:.1f} min)")
     print(f"wrote results/end_to_end_{name}.json and _log.csv")
 

@@ -120,14 +120,16 @@ def model_checks(roles):
             rows = [sc.score(r["question"], r["choices"], int(r["gold"])) for _, r in sub.iterrows()]
             df = pd.DataFrame(rows)
             res[ct] = df["correct"].mean()
-            print(f"{role:<10}{'chat' if ct else 'raw':<10}{res[ct]:>7.3f}{m['published_mmlu'] / 100:>11.3f}"
+            pub = m.get("published_mmlu")
+            print(f"{role:<10}{'chat' if ct else 'raw':<10}{res[ct]:>7.3f}{(pub / 100) if pub else float('nan'):>11.3f}"
                   f"{df['seconds'].mean():>7.2f}{df['peak_mem_gb'].max():>9.2f}")
             sc.unload()
             time.sleep(3)
         if res:
             best = max(res, key=res.get)
             config.save_override(role, best)
-            gap = m["published_mmlu"] / 100 - res[best]
+            pub = m.get("published_mmlu")
+            gap = (pub / 100 - res[best]) if pub else float("nan")
             flag = "   <-- >15 pts under published: check prompt format before scoring 2,000" if gap > 0.15 else ""
             print(f"{'':<10}-> chat_template={best}  (gap to published {gap:+.3f}){flag}")
     print(f"\nchoices written to {config.OVERRIDES_JSON}")

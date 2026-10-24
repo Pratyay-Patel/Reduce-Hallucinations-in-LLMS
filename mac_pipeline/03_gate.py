@@ -110,15 +110,24 @@ def main():
              "NOTHING TO ROUTE: neither passes")
         verdicts[(a, b)] = v
         lines.append(f"| {a} / {b} | {v} |")
-    pool_pairs = [(a, b) for a, b in itertools.combinations(config.POOL, 2) if a in roles and b in roles]
-    complementary = [p for p in pool_pairs if verdicts.get(p, "").startswith("COMPLEMENTARY")]
     lines += ["", "## Decision", ""]
-    if complementary:
-        lines.append(f"At least one pool pair is complementary ({complementary}). "
-                     "Train the hybrid router (04) and compare it to the plain cascade.")
-    else:
-        lines.append("No pool pair is complementary. Report the plain cascade only; "
-                     "the hybrid step is skipped (dominance regime).")
+    routed = [r for r in config.ROUTED if r in roles]
+    esc_role = config.ESCALATION
+    # routing gate: the routed tier must be complementary, else route everything to the dominant one
+    for a, b in itertools.combinations(routed, 2):
+        v = verdicts.get((a, b)) or verdicts.get((b, a), "")
+        if v.startswith("COMPLEMENTARY"):
+            lines.append(f"- Routed tier {a} / {b}: complementary. The router (04) has something to pick between.")
+        else:
+            lines.append(f"- Routed tier {a} / {b}: {v}. A router cannot beat the dominant model here; "
+                         f"the route-only result in 05 should sit on it.")
+    # escalation gate: does the 3B fix the routed models' errors above chance?
+    if esc_role in roles:
+        for a in routed:
+            p = tr.loc[(a, esc_role), "passes"]
+            lines.append(f"- Escalation {a} -> {esc_role}: {'PASS' if p else 'no'} "
+                         f"({esc_role} is right on {tr.loc[(a, esc_role), 'rate']:.0%} of {a}'s errors, "
+                         f"chance {tr.loc[(a, esc_role), 'chance']:.0%}).")
     # per-dataset table, train
     lines += ["", "## Per dataset (train)", "",
               "| dataset | A | B | rate | chance | headroom | p | passes |", "|---|---|---|---:|---:|---:|---:|---|"]

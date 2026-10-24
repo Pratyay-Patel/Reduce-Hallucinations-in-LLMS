@@ -8,11 +8,15 @@
 #
 # Running in sessions (to let the machine cool): Ctrl-C at any time, later run with `resume`.
 # Only the step that was interrupted is redone; every finished step has a marker in logs/done/.
-# Measured in Results_Run2 (1,992 questions, 4 models); the longest single step is ~80 min:
-#   session 1  00 (seconds) + scoring x 4 models (~4 h) + cooldowns                          ~4.5 h
-#   session 2  gate/router/simulate (minutes) + 8 end-to-end configurations (~3 h) + cooldowns ~4 h
-# E2E="hybrid cascade:qwen3b base single:qwen3b" bash mac_pipeline/run_all.sh resume
-#   limits the end-to-end step to those configurations (default: all eight).
+# Decision rule: router picks generalist or math (1.5B); confidence below the route's tau ->
+# Qwen 3B. Datasets mmlu, csqa, arc (letter) + aqua (reason-then-letter, ~25-50 s/question).
+# Estimated from Results_Run2 timings; the longest single step is one model's scoring (~5 h
+# for the 3B because of AQuA reasoning). Check the first AQuA log for the real s/question.
+#   session 1  00 (seconds) + scoring x 3 models (~9.5 h) + cooldowns                         ~10 h
+#   session 2  gate/router/simulate (minutes) + 4 end-to-end configurations (~5 h) + cooldowns ~5.5 h
+# E2E="route-cascade base" bash mac_pipeline/run_all.sh resume
+#   limits the end-to-end step to those configurations
+#   (default: base single:qwen3b cascade:qwen3b route-cascade; also available: route, single:math).
 # COOLDOWN=0 disables the 5 min idle sleep between model runs.
 # CHECK_MODELS=1 makes 00 re-score 200 MMLU questions per model in raw and chat format to
 #   re-choose the prompt format (~1 h). Off by default: the choices from Results_Run2 are in
@@ -189,22 +193,17 @@ step 05_simulate     "$PYTHON" mac_pipeline/05_simulate.py     || fail_hard "sim
 check 05_simulate simulate                                      || fail_hard "simulate outputs"
 
 # ------------------------------------------------------------------ end-to-end (measured)
-# every configuration, so the paper can pick: hybrid, each plain cascade, the base alone,
-# each pool model alone. A failure here does not stop the others.
+# the configurations the paper reports; the simulation (05) covers the rest from the scoring
+# data. A failure here does not stop the others.
 if [[ -n "${E2E:-}" ]]; then
   read -r -a E2E <<< "$E2E"
 else
-  E2E=(hybrid)
-  for p in "${POOL[@]}"; do E2E+=("cascade:$p"); done
-  E2E+=(base)
-  for p in "${POOL[@]}"; do E2E+=("single:$p"); done
+  E2E=(base "single:${POOL[0]}" "cascade:${POOL[0]}" route-cascade)
 fi
-TAU_STAR="$("$PYTHON" -c "import json;print(f\"{json.load(open('mac_pipeline/router/thresholds.json'))['tau_star']:.2f}\")")"
 for cfg in "${E2E[@]}"; do
   name="06_e2e_${cfg//:/-}"
-  case "$cfg" in base) tau="0.00";; single:*) tau="1.01";; *) tau="$TAU_STAR";; esac
   step "$name" "$PYTHON" mac_pipeline/06_run_end_to_end.py --config "$cfg" || { log "end-to-end $cfg failed; continuing"; cooldown; continue; }
-  check "$name" e2e --name "${cfg//:/-}_$tau" || log "end-to-end $cfg outputs incomplete; continuing"
+  check "$name" e2e --name "${cfg//:/-}" || log "end-to-end $cfg outputs incomplete; continuing"
   cooldown
 done
 

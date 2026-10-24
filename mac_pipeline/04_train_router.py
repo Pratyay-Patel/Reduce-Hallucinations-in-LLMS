@@ -1,15 +1,21 @@
 """
 mac_pipeline/04_train_router.py
 -------------------------------
-Train split only.
+Train split only. The decision rule is route-then-cascade:
 
-  1. Frozen MiniLM embeddings for EVERY question (train and test), tracked by CodeCarbon so
-     the router's own energy per question is known and charged later.
-  2. "Whether": sweep tau on the base model's confidence (out-of-fold on train).
-  3. "Where": per pool model, logistic regression on [base confidence, PCA-32(embedding)]
-     -> P(pool model right). Regularisation by 5-fold CV. Also a subject-one-hot baseline.
+  router (ex-ante, from the question text alone)  ->  one of the ROUTED 1.5B models answers
+  that model's confidence < tau[route]            ->  the ESCALATION 3B model answers instead
+
+  1. Frozen MiniLM embeddings for EVERY question (train and test), tracked so the router's own
+     energy per question is known and charged later.
+  2. "Where": per routed model, a classifier on PCA-32(embedding) -> P(that model is right).
+     The router picks the argmax. Feature ablation (embedding vs subject one-hot), head
+     ablation (lr / rf / xgb / svc / mlp / voting), everything out-of-fold on train.
+  3. "Whether": per route, sweep tau on the routed model's own confidence (out-of-fold picks)
+     and choose tau[route]; also one global tau for the ablation and the tau of the plain
+     cascade generalist -> escalation.
   4. Save router/embeddings.npy, router/router.pkl, router/thresholds.json,
-     results/router_train.md (OOF AUCs and the tau chosen).
+     results/router_train.md.
 
   python mac_pipeline/04_train_router.py [--no-energy]
 """
@@ -61,12 +67,12 @@ def embed_all(q: pd.DataFrame, track: bool):
 
 
 def make_head(name: str, seed: int = 0, C: float = 0.5):
-    """Router head = a probabilistic classifier on [confidence, PCA(embedding)].
+    """Router head = a probabilistic classifier on PCA(embedding).
 
-    No class_weight anywhere: the router picks argmax P(right) across pool models, so each
-    model's base rate must survive -- 'balanced' erased exactly the dominance information.
+    No class_weight anywhere: the router picks argmax P(right) across the routed models, so
+    each model's base rate must survive -- 'balanced' erased exactly the dominance information.
     lr is the literature default for dense embeddings; the others are the classifier families
-    the paper used on the 8 NeMo features, kept as an ablation (04 compares them out-of-fold).
+    the paper used on the 8 NeMo features, kept as an ablation.
     """
     if name == "lr":
         return LogisticRegression(max_iter=4000, C=C)
@@ -93,6 +99,7 @@ def make_head(name: str, seed: int = 0, C: float = 0.5):
 
 
 def oof_auc(X, y, seed, C=0.5, head="lr"):
+    """5-fold out-of-fold probabilities and AUC. Scaler fitted inside each fold."""
     if y.sum() < 5 or (1 - y).sum() < 5:
         return np.nan, np.full(len(y), y.mean())
     p = np.zeros(len(y))
@@ -103,12 +110,22 @@ def oof_auc(X, y, seed, C=0.5, head="lr"):
     return roc_auc_score(y, p), p
 
 
-def oof_pca_features(E, conf, seed):
-    """PCA fitted inside each fold so the embedding never sees held-out rows."""
-    # For simplicity and speed the PCA is fitted on all train rows here; the CV is over the
-    # logistic regression. PCA is unsupervised so this is a mild leak at most.
-    Z = PCA(config.PCA_DIMS, random_state=seed).fit_transform(E)
-    return np.hstack([conf.reshape(-1, 1), Z])
+def pca_features(E, seed=0):
+    # PCA is unsupervised and fitted on all train rows (never on test); the CV is over the head
+    return PCA(config.PCA_DIMS, random_state=seed).fit_transform(E)
+
+
+def choose_tau(conf, c_route, c_esc):
+    """Sweep tau on one route's confidence: accuracy if conf < tau escalates. Returns the sweep
+    and tau*: best accuracy among non-degenerate points, ties to the least escalation."""
+    sweep = []
+    for tau in config.TAU_GRID:
+        esc = conf < tau
+        acc = np.where(esc, c_esc, c_route).mean() if len(conf) else np.nan
+        sweep.append(dict(tau=tau, escalated=float(esc.mean()) if len(conf) else np.nan, acc=float(acc)))
+    inner = [s for s in sweep if 0 < s["escalated"] < 1]
+    best = max(inner or sweep, key=lambda s: (round(s["acc"], 4), -s["escalated"]))
+    return sweep, best["tau"]
 
 
 def main():
@@ -122,76 +139,73 @@ def main():
 
     scores = load_scores()
     roles = [r for r in config.ALL_ROLES if r in set(scores["model"])]
-    pool = [r for r in config.POOL if r in roles]
+    routed = [r for r in config.ROUTED if r in roles]
+    esc_role = config.ESCALATION
+    if esc_role not in roles or len(routed) < 2:
+        sys.exit(f"need scores for {config.ROUTED} and {esc_role}; have {roles}")
     piv = pivot_scores(scores, roles, fold="train")
     ids = piv.index.tolist()
     n = len(ids)
     E = E_all[[id2row[i] for i in ids]]
-    conf = piv[("graded", config.BASE)].values
     C = {r: piv[("correct", r)].values.astype(int) for r in roles}
-    subj = q.set_index("id").loc[ids, "subject"]
+    CONF = {r: piv[("graded", r)].values for r in roles}
+    qi = q.set_index("id").loc[ids]
+    subj = qi["subject"]
+    ds_of = qi["dataset"].values
     S = pd.get_dummies(subj).values.astype(float)
-    print(f"train n={n}  roles={roles}")
+    Z = pca_features(E)
+    stack = np.vstack([C[r] for r in routed])
+    print(f"train n={n}  routed={routed}  escalation={esc_role}")
 
-    lines = ["# Router training (train split, out-of-fold)", "", f"n = {n}", ""]
+    lines = ["# Router training (train split, out-of-fold)", "",
+             f"n = {n}; routed tier = {routed}; escalation = {esc_role}", "",
+             "Decision rule: the router reads the question text (MiniLM embedding, PCA-32) and picks "
+             "the routed model with the highest predicted P(right). That model answers; if its option "
+             "confidence is below the route's tau, the escalation model answers instead.", ""]
 
-    # ---- "whether": is the base wrong?  confidence vs embedding vs both
-    y_wrong = 1 - C[config.BASE]
-    Xc = conf.reshape(-1, 1)
-    Xpca = oof_pca_features(E, conf, 0)
-    aucs = {}
-    for name, X in (("confidence", Xc), ("embedding PCA32", Xpca[:, 1:]), ("conf + PCA32", Xpca),
-                    ("subject one-hot", S)):
-        aucs[name] = np.nanmean([oof_auc(X, y_wrong, s)[0] for s in config.ROUTER_SEEDS])
-    lines += ["## Target: base is wrong", "", "| features | OOF AUC |", "|---|---:|"]
-    lines += [f"| {k} | {v:.3f} |" for k, v in aucs.items()]
-    print("base-wrong AUC:", {k: round(v, 3) for k, v in aucs.items()})
-
-    # ---- "where": per pool model P(right). Feature ablation with lr, then head ablation.
-    lines += ["", "## Target: pool model is right (lr head, feature ablation)", "",
-              "| pool model | conf | PCA32 | conf+PCA32 | subject | chosen C |", "|---|---:|---:|---:|---:|---:|"]
+    # ---- "where": per routed model P(right) from the text alone. Feature ablation with lr.
+    lines += ["## Target: routed model is right (lr head, feature ablation, OOF AUC)", "",
+              "| routed model | train acc | PCA32 | subject one-hot | chosen C |", "|---|---:|---:|---:|---:|"]
     best_C = {}
-    for r in pool:
+    for r in routed:
         y = C[r]
-        a_c = np.nanmean([oof_auc(Xc, y, s)[0] for s in config.ROUTER_SEEDS])
-        a_e = np.nanmean([oof_auc(Xpca[:, 1:], y, s)[0] for s in config.ROUTER_SEEDS])
         a_s = np.nanmean([oof_auc(S, y, s)[0] for s in config.ROUTER_SEEDS])
         best_c, best_a = None, -1
         for c in C_GRID:
-            a = np.nanmean([oof_auc(Xpca, y, s, C=c)[0] for s in config.ROUTER_SEEDS])
+            a = np.nanmean([oof_auc(Z, y, s, C=c)[0] for s in config.ROUTER_SEEDS])
             if a > best_a:
                 best_c, best_a = c, a
         best_C[r] = best_c
-        lines.append(f"| {r} | {a_c:.3f} | {a_e:.3f} | {best_a:.3f} | {a_s:.3f} | {best_c} |")
-        print(f"{r}: conf {a_c:.3f}  emb {a_e:.3f}  both {best_a:.3f}  subject {a_s:.3f}  C={best_c}")
+        lines.append(f"| {r} | {y.mean():.3f} | {best_a:.3f} | {a_s:.3f} | {best_c} |")
+        print(f"{r}: acc {y.mean():.3f}  AUC emb {best_a:.3f}  subject {a_s:.3f}  C={best_c}")
 
-    # head ablation: same features, every classifier family; OOF AUC per pool model and the OOF
-    # hybrid accuracy the head's argmax picks produce at tau = 1 (every question routed)
-    stack = np.vstack([C[r] for r in pool])
-    heads = [h for h in config.ROUTER_HEADS]
-    lines += ["", "## Head ablation (conf + PCA32 features, OOF)", "",
-              "| head | " + " | ".join(f"AUC {r}" for r in pool) + " | mean AUC | routed acc (all escalated) | oracle |",
-              "|---|" + "---:|" * (len(pool) + 3)]
+    # head ablation: OOF routed accuracy of each head's argmax picks, against the singles and oracle
+    heads = list(config.ROUTER_HEADS)
+    lines += ["", "## Head ablation (PCA32 features, OOF)", "",
+              "| head | " + " | ".join(f"AUC {r}" for r in routed) + " | mean AUC | routed acc | " +
+              " | ".join(f"always-{r}" for r in routed) + " | oracle |",
+              "|---|" + "---:|" * (2 * len(routed) + 3)]
     head_res = {}
     for h in heads:
         try:
             P_h, A_h = [], []
-            for r in pool:
-                res = [oof_auc(Xpca, C[r], s, C=best_C[r], head=h) for s in config.ROUTER_SEEDS]
+            for r in routed:
+                res = [oof_auc(Z, C[r], s, C=best_C[r], head=h) for s in config.ROUTER_SEEDS]
                 A_h.append(np.nanmean([x[0] for x in res]))
                 P_h.append(np.mean([x[1] for x in res], axis=0))
             P_h = np.vstack(P_h)
-            routed = stack[P_h.argmax(axis=0), np.arange(n)].mean()
-            head_res[h] = dict(aucs=A_h, mean_auc=float(np.nanmean(A_h)), P=P_h, routed=float(routed))
+            pick = P_h.argmax(axis=0)
+            acc = stack[pick, np.arange(n)].mean()
+            head_res[h] = dict(aucs=A_h, mean_auc=float(np.nanmean(A_h)), P=P_h, routed=float(acc))
             lines.append(f"| {h} | " + " | ".join(f"{a:.3f}" for a in A_h) +
-                         f" | {head_res[h]['mean_auc']:.3f} | {routed:.3f} | {stack.max(axis=0).mean():.3f} |")
-            print(f"head {h:<7} AUC {[round(a, 3) for a in A_h]}  mean {head_res[h]['mean_auc']:.3f}  routed {routed:.3f}")
+                         f" | {head_res[h]['mean_auc']:.3f} | {acc:.3f} | " +
+                         " | ".join(f"{C[r].mean():.3f}" for r in routed) + f" | {stack.max(axis=0).mean():.3f} |")
+            print(f"head {h:<7} AUC {[round(a, 3) for a in A_h]}  routed {acc:.3f}")
         except Exception as e:                      # e.g. xgboost not installed
-            lines.append(f"| {h} | " + " | ".join("-" for _ in pool) + f" | - | - | ({type(e).__name__}) |")
+            lines.append(f"| {h} | " + " | ".join("-" for _ in routed) + " | - | - | " +
+                         " | ".join("-" for _ in routed) + f" | ({type(e).__name__}) |")
             print(f"head {h}: skipped ({type(e).__name__}: {e})")
     if config.ROUTER_HEAD == "auto":
-        # select on the objective the router is used for -- OOF accuracy of its argmax picks --
-        # not on AUC: on the first Mac run rf had the best AUC and the worst routed accuracy
         head = max(head_res, key=lambda h: (round(head_res[h]["routed"], 4), head_res[h]["mean_auc"]))
     else:
         head = config.ROUTER_HEAD
@@ -199,12 +213,27 @@ def main():
             sys.exit(f"router head {head} did not train")
     lines += ["", f"**Head used: `{head}`** ({'best OOF routed accuracy, ties by mean AUC' if config.ROUTER_HEAD == 'auto' else 'fixed in config'})."]
     print(f"router head: {head}")
+    P = head_res[head]["P"]
+    pick = P.argmax(axis=0)
 
-    # fit the chosen head on all train rows, per pool model
-    router = {"pool": pool, "pca_dims": config.PCA_DIMS, "head": head, "models": {}}
-    for j, r in enumerate(pool):
+    # where do the picks go, per dataset (OOF)?
+    lines += ["", "## Router picks per dataset (OOF, train)", "",
+              "| dataset | n | " + " | ".join(f"-> {r}" for r in routed) + " | routed acc | " +
+              " | ".join(f"always-{r}" for r in routed) + " |", "|---|---:|" + "---:|" * (2 * len(routed) + 1)]
+    for ds in config.DATASETS:
+        m = ds_of == ds
+        if not m.any():
+            continue
+        lines.append(f"| {ds} | {int(m.sum())} | " + " | ".join(f"{(pick[m] == j).mean():.0%}" for j in range(len(routed))) +
+                     f" | {stack[pick[m], np.where(m)[0]].mean():.3f} | " +
+                     " | ".join(f"{C[r][m].mean():.3f}" for r in routed) + " |")
+
+    # fit the chosen head on all train rows, per routed model
+    router = {"routed": routed, "escalation": esc_role, "pca_dims": config.PCA_DIMS, "head": head,
+              "features": "pca32", "models": {}}
+    for j, r in enumerate(routed):
         pca = PCA(config.PCA_DIMS, random_state=0).fit(E)
-        X = np.hstack([conf.reshape(-1, 1), pca.transform(E)])
+        X = pca.transform(E)
         sc = StandardScaler().fit(X)
         clf = make_head(head, 0, best_C[r]).fit(sc.transform(X), C[r])
         router["models"][r] = {"pca": pca, "scaler": sc, "clf": clf, "C": best_C[r],
@@ -212,31 +241,63 @@ def main():
     with open(config.ROUTER_DIR / "router.pkl", "wb") as f:
         pickle.dump(router, f)
 
-    # ---- tau sweep on train (OOF router picks of the chosen head), to choose tau*
-    P = head_res[head]["P"]
-    choice = P.argmax(axis=0)
-    best_single = max(roles, key=lambda r: C[r].mean())
-    lines += ["", f"## tau sweep on train (hybrid = base -> router pick; plain = base -> {best_single})", "",
-              "| tau | escalated | hybrid acc | plain acc | oracle-router acc |", "|---:|---:|---:|---:|---:|"]
-    sweep = []
-    for tau in config.TAU_GRID:
-        esc = conf < tau
-        hyb = np.where(esc, stack[choice, np.arange(n)], C[config.BASE]).mean()
-        plain = np.where(esc, C[best_single], C[config.BASE]).mean()
-        orc = np.where(esc, stack.max(axis=0), C[config.BASE]).mean()
-        sweep.append(dict(tau=tau, escalated=float(esc.mean()), hybrid=float(hyb), plain=float(plain), oracle=float(orc)))
-        lines.append(f"| {tau:.2f} | {esc.mean():.1%} | {hyb:.3f} | {plain:.3f} | {orc:.3f} |")
-    # tau*: best hybrid accuracy; ties -> least escalation
-    inner = [s for s in sweep if 0 < s["escalated"] < 1]
-    tau_star = max(inner or sweep, key=lambda s: (round(s["hybrid"], 4), -s["escalated"]))["tau"]
-    thresholds = {"tau_star": tau_star, "best_single": best_single, "sweep": sweep,
-                  "base_wrong_auc": aucs, "pool": pool, "head": head,
+    # ---- "whether": does each routed model's confidence find its own errors?
+    lines += ["", "## Confidence as a failure signal (AUC of 1 - confidence for 'model is wrong')", "",
+              "| model | all train | on its routed questions |", "|---|---:|---:|"]
+    for j, r in enumerate(routed):
+        y = 1 - C[r]
+        a_all = roc_auc_score(y, -CONF[r]) if 0 < y.mean() < 1 else np.nan
+        m = pick == j
+        a_rt = roc_auc_score(y[m], -CONF[r][m]) if m.sum() > 10 and 0 < y[m].mean() < 1 else np.nan
+        lines.append(f"| {r} | {a_all:.3f} | {a_rt:.3f} |")
+
+    # ---- tau per route (on the OOF-routed questions), one global tau, and the plain cascade's tau
+    tau_per_route, sweeps = {}, {}
+    lines += ["", f"## tau per route (train, OOF picks): routed model answers; confidence < tau -> {esc_role}", ""]
+    for j, r in enumerate(routed):
+        m = pick == j
+        sweep, t = choose_tau(CONF[r][m], C[r][m], C[esc_role][m])
+        tau_per_route[r], sweeps[r] = t, sweep
+        lines += [f"### route -> {r}  (n = {int(m.sum())}, tau* = {t})", "",
+                  "| tau | escalated | acc |", "|---:|---:|---:|"]
+        lines += [f"| {s['tau']:.2f} | {s['escalated']:.1%} | {s['acc']:.3f} |" for s in sweep]
+        lines.append("")
+    # global tau: one threshold shared by the routes
+    conf_pick = CONF[routed[0]].copy()
+    c_pick = stack[pick, np.arange(n)]
+    for j, r in enumerate(routed):
+        conf_pick[pick == j] = CONF[r][pick == j]
+    g_sweep, tau_global = choose_tau(conf_pick, c_pick, C[esc_role])
+    # plain cascade: generalist alone first, no router
+    p_sweep, tau_cascade = choose_tau(CONF[config.BASE], C[config.BASE], C[esc_role])
+    lines += [f"### one global tau for route-then-cascade: tau* = {tau_global}", "",
+              "| tau | escalated | acc |", "|---:|---:|---:|"]
+    lines += [f"| {s['tau']:.2f} | {s['escalated']:.1%} | {s['acc']:.3f} |" for s in g_sweep]
+    lines += ["", f"### plain cascade {config.BASE} -> {esc_role} (no router): tau* = {tau_cascade}", "",
+              "| tau | escalated | acc |", "|---:|---:|---:|"]
+    lines += [f"| {s['tau']:.2f} | {s['escalated']:.1%} | {s['acc']:.3f} |" for s in p_sweep]
+
+    # summary of the train-split decision rule
+    acc_rc = np.mean([np.where(CONF[r][pick == j] < tau_per_route[r], C[esc_role][pick == j], C[r][pick == j]).sum()
+                      for j, r in enumerate(routed)]) * len(routed) / n
+    lines += ["", "## Train-split summary (OOF)", "",
+              f"- route only (no escalation): {c_pick.mean():.3f}",
+              f"- route then cascade, per-route tau: {acc_rc:.3f}",
+              f"- plain cascade {config.BASE} -> {esc_role} at tau {tau_cascade}: "
+              f"{max(p_sweep, key=lambda s: s['tau'] == tau_cascade)['acc']:.3f}",
+              f"- always-{esc_role}: {C[esc_role].mean():.3f}",
+              f"- oracle over routed tier: {stack.max(axis=0).mean():.3f}; oracle over all: "
+              f"{np.maximum(stack.max(axis=0), C[esc_role]).mean():.3f}"]
+
+    thresholds = {"tau_star": tau_global, "tau_per_route": tau_per_route, "tau_cascade": tau_cascade,
+                  "routed": routed, "escalation": esc_role, "head": head,
+                  "sweeps": {"per_route": sweeps, "global": g_sweep, "cascade": p_sweep},
                   "head_ablation": {h: {"aucs": v["aucs"], "mean_auc": v["mean_auc"], "routed": v["routed"]}
                                     for h, v in head_res.items()}}
     (config.ROUTER_DIR / "thresholds.json").write_text(json.dumps(thresholds, indent=2))
-    lines += ["", f"**tau\\* = {tau_star}** (best OOF hybrid accuracy on train, ties to least escalation)"]
     (config.RESULTS_DIR / "router_train.md").write_text("\n".join(lines), encoding="utf-8")
-    print(f"\ntau* = {tau_star}   wrote router/router.pkl, router/thresholds.json, results/router_train.md")
+    print(f"\ntau per route = {tau_per_route}   global tau* = {tau_global}   cascade tau = {tau_cascade}")
+    print("wrote router/router.pkl, router/thresholds.json, results/router_train.md")
 
 
 if __name__ == "__main__":

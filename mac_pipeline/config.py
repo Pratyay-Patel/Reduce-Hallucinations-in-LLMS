@@ -39,13 +39,24 @@ if platform.system() == "Windows":
         os.environ.pop("TRANSFORMERS_CACHE", None)
 
 # ----------------------------------------------------------------------------- models
-BASE = "base"
-POOL = ["qwen3b", "phi4mini", "llama3b"]
+# Decision rule (Oct 24): route-then-cascade.
+#   router (question text only) -> one of the ROUTED 1.5B models answers
+#   its confidence < tau[route]  -> the ESCALATION 3B model answers instead
+# Results_Run2 used base=Qwen2.5-1.5B with a pool of three 3B models (qwen3b, phi4mini, llama3b)
+# chosen by the router after the base had answered; see RESULTS_RUN2.md.
+BASE = "generalist"                       # the plain cascade's first model; also "base" anchors
+ROUTED = ["generalist", "math"]           # the 1.5B tier the router chooses among
+ESCALATION = "qwen3b"
+POOL = [ESCALATION]                       # models a question can be escalated to
 MODELS = {
-    "base":     dict(id="Qwen/Qwen2.5-1.5B-Instruct",      chat_template=False, published_mmlu=60.0),
-    "qwen3b":   dict(id="Qwen/Qwen2.5-3B-Instruct",        chat_template=False, published_mmlu=65.6),
-    "phi4mini": dict(id="microsoft/Phi-4-mini-instruct",   chat_template=True,  published_mmlu=67.3),
-    "llama3b":  dict(id="meta-llama/Llama-3.2-3B-Instruct", chat_template=True,  published_mmlu=63.4),
+    "generalist": dict(id="Qwen/Qwen2.5-1.5B-Instruct",      chat_template=False, published_mmlu=60.0),
+    # Qwen2.5-Math-1.5B-Instruct: no published MMLU; raw letter format like the other Qwen2.5
+    # models (00_check_env with CHECK_MODELS=1 re-checks raw vs chat on 200 MMLU questions)
+    "math":       dict(id="Qwen/Qwen2.5-Math-1.5B-Instruct", chat_template=False, published_mmlu=None),
+    "qwen3b":     dict(id="Qwen/Qwen2.5-3B-Instruct",        chat_template=False, published_mmlu=65.6),
+    # Results_Run2 pool members, not in the current workflow:
+    # "phi4mini": dict(id="microsoft/Phi-4-mini-instruct",   chat_template=True,  published_mmlu=67.3),
+    # "llama3b":  dict(id="meta-llama/Llama-3.2-3B-Instruct", chat_template=True,  published_mmlu=63.4),
     # LoRA roles: a base id plus an adapter (HF repo id from lora/colab_train_lora.ipynb, or a
     # local dir). The adapter must have been trained on exactly that base. Uncomment and edit
     # once the adapters exist, then add the roles to POOL.
@@ -56,7 +67,7 @@ MODELS = {
     # "qwen3b_knowledge": dict(id="Qwen/Qwen2.5-3B-Instruct", adapter="<hf-user>/qwen2.5-3b-instruct-lora-knowledge",
     #                          chat_template=False, published_mmlu=65.6),
 }
-ALL_ROLES = [BASE] + POOL
+ALL_ROLES = ROUTED + [ESCALATION]
 
 # ----------------------------------------------------------------------------- datasets
 MMLU_SUBJECTS = {
@@ -72,6 +83,13 @@ MMLU_SUBJECTS = {
 MMLU_PER_SUBJECT = 50
 CSQA_N = 500                              # CommonsenseQA validation (1,221 labelled), seeded sample
 ARC_N = 500
+# AQuA-RAT: multi-step arithmetic word problems, 5 options. Letter scoring alone is at chance
+# on it (Results_Run1), so it is scored with the reasoning protocol: the model reasons first
+# (greedy, bounded), then the option letters are scored after a fixed answer stem. The
+# test split (254) is the whole set; ~25 s per question for a 1.5B model on the Air.
+AQUA_SPLITS = ("test",)                   # 254 questions; add "validation" for 254 more
+COT_DATASETS = ["aqua"]                   # scored by reason-then-letter instead of letter only
+COT_MAX_NEW_TOKENS = 512                  # 256 truncated 90% of the math model's reasoning
 # Code datasets, not in the workflow (Oct 24 decision): the 1.5B coder specialist scored
 # below the 1.5B generalist on CodeMMLU's knowledge subsets, and code generation costs ~30x a
 # letter score. The builders and the generate-and-test scorer are kept; add "codemmlu" and/or
@@ -82,10 +100,9 @@ HUMANEVAL_N = 164                         # 164 = all
 MBPP_N = 257                              # 257 = all of the sanitized test split
 CODEGEN_MAX_NEW_TOKENS = 512
 CODEGEN_EXEC_TIMEOUT = 10                 # seconds per test program
-DATASETS = ["mmlu", "csqa", "arc"]
-# AQuA-RAT was the third dataset in the first Mac run (Results_Run1). Letter-likelihood scoring
-# cannot do multi-step arithmetic: three of four models sat at chance with a 60-75% position
-# habit. Replaced by CommonsenseQA, which needs knowledge/judgement, not calculation.
+DATASETS = ["mmlu", "csqa", "arc", "aqua"]
+# AQuA-RAT was in the first Mac run under plain letter scoring and sat at chance (60-75%
+# position habit); it was replaced by CommonsenseQA for Run2 and is back now with reasoning.
 
 SEED = 0
 TEST_FRAC = 0.30

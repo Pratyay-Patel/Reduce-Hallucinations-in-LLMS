@@ -36,6 +36,9 @@ def score_row(scorer, row) -> dict:
         test = json.loads(t) if isinstance(t, str) else t
         return scorer.score_code(row["question"], test, max_new_tokens=config.CODEGEN_MAX_NEW_TOKENS,
                                  timeout=config.CODEGEN_EXEC_TIMEOUT)
+    if row["dataset"] in config.COT_DATASETS:
+        return scorer.score_cot(row["question"], row["choices"], int(row["gold"]),
+                                max_new_tokens=config.COT_MAX_NEW_TOKENS)
     return scorer.score(row["question"], row["choices"], int(row["gold"]))
 
 
@@ -55,7 +58,9 @@ def subset(q: pd.DataFrame, n: int) -> pd.DataFrame:
     subject, so the first n rows would all be one or two hard STEM subjects)."""
     if n <= 0 or n >= len(q):
         return q
-    return q.sample(n, random_state=config.SEED).sort_index()
+    # not config.SEED: the fold split used that seed on the same rows, and pandas.sample with
+    # the same seed draws the same permutation, so a --limit sample came out all-train
+    return q.sample(n, random_state=config.SEED + 1000).sort_index()
 
 
 def load_scores(roles=None, repeat: int = 0) -> pd.DataFrame:
@@ -77,8 +82,10 @@ def pivot_scores(scores: pd.DataFrame, roles, fold=None):
     s = scores[scores["model"].isin(roles)]
     if fold is not None:
         s = s[s["fold"] == fold]
+    # dropna=False: a --no-energy dev run has energy_kwh_attr all NaN, which pivot_table would
+    # otherwise drop silently and break every downstream column lookup
     p = s.pivot_table(index="id", columns="model",
-                      values=["correct", "graded", "seconds", "energy_kwh_attr", "n_options"])
+                      values=["correct", "graded", "seconds", "energy_kwh_attr", "n_options"], dropna=False)
     full = p.dropna(subset=[("correct", r) for r in roles])
     if len(full) < len(p):
         # a role is missing some questions (e.g. one dataset never scored): everything

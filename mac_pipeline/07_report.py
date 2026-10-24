@@ -5,7 +5,7 @@ Assemble the paper tables and figures from results/, scores/ and energy/.
 
   Table 1  per-model accuracy per dataset; Wh, gCO2e, seconds per 1,000 questions (+- over repeats)
   Table 2  gate matrix (ordered pairs, train)
-  Table 3  end-to-end measured: always-base, always-best-single, cascade, hybrid, oracle
+  Table 3  end-to-end measured: base, singles, plain cascade, route, route-cascade
   Table 4  simulated vs measured energy for the same configurations
   Fig 1    accuracy-energy frontier (from 05)      Fig 2  per-dataset accuracy by configuration
 
@@ -95,7 +95,7 @@ def table3():
         passes = j.get("per_pass", {})
         kwh = sum((v.get("record_kwh") if v.get("record_kwh") is not None else energy.record_kwh(v))
                   for v in passes.values() if v) if passes else j["total_kwh"]
-        d = dict(config=j["config"], tau=j["tau"], n=j["n"], acc=j["accuracy"],
+        d = dict(config=j["config"], tau=j["tau"] if j.get("tau") is not None else np.nan, n=j["n"], acc=j["accuracy"],
                  escalated=j["escalation_rate"], wh_per_1000=kwh / j["n"] * 1e6,
                  gco2e_per_q=(kwh * gf / j["n"]) if gf == gf else np.nan,
                  total_kwh=kwh, wall_min=j["wall_s"] / 60)
@@ -120,12 +120,15 @@ def table4(T3):
     rows = []
     for _, r in T3.iterrows():
         cfg = r.config
-        if cfg == "hybrid":
-            m = S[(S.kind == "hybrid") & np.isclose(S.tau, r.tau)]
+        tau_s = S.tau.astype(float)
+        if cfg == "route-cascade":
+            m = S[S.kind == "route-cascade*"] if r.tau != r.tau else S[(S.kind == "route-cascade") & np.isclose(tau_s, r.tau)]
+        elif cfg == "route":
+            m = S[S.config == "route-only"]
         elif cfg.startswith("cascade:"):
-            m = S[(S.config == f"cascade base->{cfg.split(':')[1]}") & np.isclose(S.tau, r.tau)]
+            m = S[(S.config == f"cascade {config.BASE}->{cfg.split(':')[1]}") & np.isclose(tau_s, r.tau)]
         elif cfg == "base":
-            m = S[S.config == "always-base"]
+            m = S[S.config == f"always-{config.BASE}"]
         elif cfg.startswith("single:"):
             m = S[S.config == f"always-{cfg.split(':')[1]}"]
         else:
@@ -168,7 +171,7 @@ def fig2(T3):
         w = 0.8 / len(T3)
         x = np.arange(len(cols))
         for i, (_, r) in enumerate(T3.iterrows()):
-            ax.bar(x + i * w, [r[c] for c in cols], w, label=f"{r.config} τ={r.tau:.2f}")
+            ax.bar(x + i * w, [r[c] for c in cols], w, label=f"{r.config}" + (f" τ={r.tau:.2f}" if r.tau == r.tau else ""))
         ax.set_xticks(x + w * (len(T3) - 1) / 2)
         ax.set_xticklabels([c[4:] for c in cols])
         ax.set_ylabel("accuracy (test)")

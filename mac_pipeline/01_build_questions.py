@@ -8,6 +8,7 @@ Build the question bank and the train/test split, once.
   arc       ARC-Challenge test, seeded sample of 500                     3-5 options
   codemmlu  CodeMMLU knowledge subsets, 100 each (5 subsets)            3-4 options
   codegen   HumanEval (164) + MBPP sanitized test (257)                  generation + unit tests
+  aqua      AQuA-RAT test (254), scored with reasoning                   5 options
 
 Only the datasets listed in config.DATASETS are built.
 Writes questions/questions.csv and questions/split.csv (70/30, stratified on dataset x subject).
@@ -140,8 +141,26 @@ def build_codegen():
     return rows
 
 
+_AQUA_OPT = re.compile(r"^\s*([A-E])\s*[\)\.:]\s*")
+
+
+def build_aqua():
+    rows = []
+    for split in config.AQUA_SPLITS:
+        ds = load_dataset("deepmind/aqua_rat", "raw", split=split)
+        for i, r in enumerate(ds):
+            opts = [_AQUA_OPT.sub("", o).strip() for o in r["options"]]
+            gold = LETTERS.index(r["correct"].strip().upper())
+            if len(opts) != 5 or not (0 <= gold < 5):
+                continue
+            rows.append(dict(id=f"aqua:{split}:{i}", dataset="aqua", subject="aqua", group="math",
+                             source_split=split, question=r["question"].strip(),
+                             choices=opts, gold=gold))
+    return rows
+
+
 BUILDERS = {"mmlu": build_mmlu, "csqa": build_csqa, "arc": build_arc,
-            "codemmlu": build_codemmlu, "codegen": build_codegen}
+            "codemmlu": build_codemmlu, "codegen": build_codegen, "aqua": build_aqua}
 
 
 def main():

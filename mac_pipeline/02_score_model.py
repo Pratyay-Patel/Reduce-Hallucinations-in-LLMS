@@ -1,9 +1,10 @@
 """
 mac_pipeline/02_score_model.py
 ------------------------------
-Score one model on every question (train and test) with option-likelihood scoring (the
-`codegen` dataset instead generates code and runs its unit tests), one tracked run per
-dataset, energy attributed per question by share of wall time.
+Score one model on every question (train and test) with option-likelihood scoring. Datasets
+in config.COT_DATASETS use reason-then-letter (the model reasons first, then the letters are
+scored after a fixed stem); `codegen`, if enabled, generates code and runs its unit tests.
+One tracked run per dataset, energy attributed per question by share of wall time.
 
   python mac_pipeline/02_score_model.py --role base
   python mac_pipeline/02_score_model.py --role phi4mini --dataset mmlu
@@ -81,19 +82,24 @@ def main():
             for k, (_, r) in enumerate(sub.iterrows()):
                 s = score_row(scorer, r)
                 rows.append(dict(id=r["id"], dataset=ds, subject=r["subject"], fold=r.get("fold"),
-                                 model=role, chat_template=int(ct if ds != "codegen" else True),
+                                 model=role, chat_template=int(ct if ds not in config.COT_DATASETS and ds != "codegen" else True),
                                  n_options=int(r["n_options"]),
                                  gold=int(r["gold"]), pred=s["pred"], pred_letter=s["pred_letter"],
                                  correct=s["correct"], graded=s["graded"], p_gold=s["p_gold"],
                                  logprobs=json.dumps(s["logprobs"]), prompt_tokens=s["prompt_tokens"],
                                  rendered_prompt=s["rendered_prompt"],
                                  seconds=s["seconds"], peak_mem_gb=s["peak_mem_gb"],
+                                 # reasoning datasets only: the reasoning text, its length, whether
+                                 # it hit the token cap, and the letter the model stated in text
+                                 reasoning_tokens=s.get("reasoning_tokens"), truncated=s.get("truncated"),
+                                 stated_letter=s.get("stated_letter"),
+                                 stated_matches_scored=s.get("stated_matches_scored"),
+                                 reasoning=s.get("reasoning"),
                                  # codegen only: the reply, its length, and what the test run said
                                  generated=s.get("generated"), gen_tokens=s.get("gen_tokens"),
-                                 truncated=s.get("truncated"), exec_status=s.get("exec_status"),
-                                 exec_seconds=s.get("exec_seconds"),
+                                 exec_status=s.get("exec_status"), exec_seconds=s.get("exec_seconds"),
                                  energy_kwh_attr=np.nan, run_id=None, repeat=args.repeat))
-                if (k + 1) % (20 if ds == "codegen" else 100) == 0:
+                if (k + 1) % (20 if (ds == "codegen" or ds in config.COT_DATASETS) else 100) == 0:
                     acc = np.mean([x["correct"] for x in rows])
                     print(f"  {ds}: {k + 1}/{len(sub)}  acc {acc:.3f}  "
                           f"{np.mean([x['seconds'] for x in rows]):.2f} s/q", flush=True)
@@ -123,6 +129,11 @@ def main():
             print(f"  {ds}: pass {df['correct'].mean():.3f}  truncated {df['truncated'].mean():.1%}  "
                   f"status {df['exec_status'].value_counts().to_dict()}  "
                   f"mean {df['gen_tokens'].mean():.0f} tokens")
+        if ds in config.COT_DATASETS:
+            sm = df["stated_matches_scored"].dropna()
+            print(f"  {ds}: reasoning mean {df['reasoning_tokens'].mean():.0f} tokens, "
+                  f"truncated {df['truncated'].mean():.1%}, stated a letter {df['stated_letter'].notna().mean():.0%}, "
+                  f"stated = scored {sm.mean() if len(sm) else float('nan'):.0%}")
         if df["correct"].mean() < chance + 0.05:
             print(f"  WARNING: {role} is at chance on {ds} ({df['correct'].mean():.3f} vs {chance:.3f}); "
                   f"its confidence there is noise.")

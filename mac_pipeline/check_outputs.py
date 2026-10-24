@@ -7,7 +7,7 @@ a non-zero exit means the step's outputs are missing or short.
   python mac_pipeline/check_outputs.py questions
   python mac_pipeline/check_outputs.py scores --role base [--datasets mmlu csqa arc] [--repeat 1 --limit 200]
   python mac_pipeline/check_outputs.py gate | router | simulate | report
-  python mac_pipeline/check_outputs.py e2e --name hybrid_0.60
+  python mac_pipeline/check_outputs.py e2e --name route-cascade
 """
 
 import argparse
@@ -75,6 +75,9 @@ def check_scores(role, datasets, repeat, limit):
             chance = float(chance_of(rows["n_options"]).mean())
             if rows["correct"].mean() < chance + 0.05:
                 problems.append(f"{path.name}: {ds} accuracy {rows['correct'].mean():.3f} is at chance ({chance:.3f})")
+            if ds in config.COT_DATASETS and "truncated" in rows.columns and rows["truncated"].mean() > 0.5:
+                print(f"  WARNING: {ds} reasoning hit the {config.COT_MAX_NEW_TOKENS}-token cap on "
+                      f"{rows['truncated'].mean():.0%} of questions; consider a higher COT_MAX_NEW_TOKENS")
         e = energy.load_summary(f"{role}_{ds}_r{repeat}")
         if e is None:
             problems.append(f"energy summary {role}_{ds}_r{repeat}.json missing")
@@ -98,10 +101,12 @@ def check_router():
     need(config.ROUTER_DIR / "embedding_ids.csv")
     if need(config.ROUTER_DIR / "thresholds.json"):
         t = json.loads((config.ROUTER_DIR / "thresholds.json").read_text())
-        if "tau_star" not in t:
-            problems.append("thresholds.json has no tau_star")
-        else:
-            print(f"  tau* = {t['tau_star']}   head = {t.get('head', '?')}")
+        for k in ("tau_star", "tau_per_route", "tau_cascade"):
+            if k not in t:
+                problems.append(f"thresholds.json has no {k}")
+        if "tau_per_route" in t:
+            print(f"  tau per route = {t['tau_per_route']}   global = {t.get('tau_star')}   "
+                  f"cascade = {t.get('tau_cascade')}   head = {t.get('head', '?')}")
     need(config.RESULTS_DIR / "router_train.md")
 
 

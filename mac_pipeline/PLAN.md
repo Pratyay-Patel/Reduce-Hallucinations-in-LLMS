@@ -1,10 +1,17 @@
-# Plan: cascade + routing pipeline on the M4 MacBook Air
+# Plan: route-then-cascade pipeline on the M4 MacBook Air
 
 Scripts that produce the paper's result tables: per-model accuracy and emissions, end-to-end
-system accuracy and emissions, all measured with CodeCarbon on Apple Silicon. Design follows
+system accuracy and emissions, all measured with `powermetrics` on Apple Silicon. Design follows
 [`FINDINGS.md`](../FINDINGS.md) and [`METHODS.md`](../METHODS.md): gate first, option-likelihood
-scoring, confidence for *whether*, embedding router for *where*, held-out test split,
+scoring, embedding router for *where*, confidence for *whether*, held-out test split,
 cost-matched random baseline, router overhead charged.
+
+**Decision rule (Oct 24, replaces the Run2 design).** Three models. A router reads the
+question text and sends it to one of two 1.5B models, the generalist (Qwen2.5-1.5B-Instruct)
+or the math specialist (Qwen2.5-Math-1.5B-Instruct). That model answers. If its confidence is
+below the threshold for that route, the 3B model (Qwen2.5-3B-Instruct) answers instead.
+Run2 did it the other way round (base answers first, then a router chose among three 3B
+models); its results are in `RESULTS_RUN2.md`. Phi-4-mini and Llama-3.2-3B are no longer used.
 
 **Status (2026-10-04): implemented and run once.** The first Mac run (`Results_Run1`, 2026-10-01)
 produced clean accuracy results but exposed two measurement faults and one dataset fault, all
@@ -19,22 +26,36 @@ scored on ARC. A full rerun is needed for the energy tables. See §7 for the una
 
 **Models** (fp16, torch MPS, loaded one at a time):
 
-| role | HF id | fp16 | published MMLU |
-|---|---|---:|---:|
-| `base` | `Qwen/Qwen2.5-1.5B-Instruct` | 3.1 GB | ~60 |
-| `qwen3b` | `Qwen/Qwen2.5-3B-Instruct` | 6.2 GB | ~66 |
-| `phi4mini` | `microsoft/Phi-4-mini-instruct` | 7.7 GB | ~67 |
-| `llama3b` | `meta-llama/Llama-3.2-3B-Instruct` | 6.4 GB | ~63 |
+| role | HF id | fp16 | published MMLU | job |
+|---|---|---:|---:|---|
+| `generalist` | `Qwen/Qwen2.5-1.5B-Instruct` | 3.1 GB | ~60 | routed tier; also the plain cascade's first model |
+| `math` | `Qwen/Qwen2.5-Math-1.5B-Instruct` | 3.1 GB | not published | routed tier |
+| `qwen3b` | `Qwen/Qwen2.5-3B-Instruct` | 6.2 GB | ~66 | escalation |
 
-Pool = {`qwen3b`, `phi4mini`, `llama3b`}. Llama needs the gated-repo licence accepted on HF.
+Routed tier = {`generalist`, `math`}; escalation = `qwen3b`. No gated repos. The math model
+is at chance on non-maths questions in raw letter format (0.35 on a 60-question MMLU sample,
+chance 0.25) and below that with the chat template, so the router has to keep it on maths;
+that is the point of the router. (Run2 models: `base`=the generalist, pool `qwen3b`,
+`phi4mini`, `llama3b`.)
 
-**Datasets** (all fixed-option, scored by option likelihood, no generation):
+**Datasets** (fixed-option; three by option likelihood, AQuA by reason-then-letter):
 
-| name | source | split used | n | options |
-|---|---|---|---:|---|
-| `mmlu` | `cais/mmlu`, 20 subjects × 50 | test | 1,000 | 4 |
-| `csqa` | `tau/commonsense_qa` | validation, seeded sample | 500 | 5 |
-| `arc` | `allenai/ai2_arc` ARC-Challenge | test, seeded sample | 500 | 3–5 |
+| name | source | split used | n | options | scoring |
+|---|---|---|---:|---|---|
+| `mmlu` | `cais/mmlu`, 20 subjects × 50 | test | 1,000 | 4 | letter |
+| `csqa` | `tau/commonsense_qa` | validation, seeded sample | 500 | 5 | letter |
+| `arc` | `allenai/ai2_arc` ARC-Challenge | test, seeded sample | 500 | 3–5 | letter |
+| `aqua` | `deepmind/aqua_rat` | test (all) | 254 | 5 | reason, then letter |
+
+**AQuA and the reasoning protocol.** Plain letter scoring cannot do multi-step arithmetic
+(Run1: three of four models at chance with a position habit), so on AQuA every model first
+writes its reasoning through the chat template (greedy, at most 512 new tokens), then the
+text `Therefore, the answer is (` is appended and the option letters are scored exactly as on
+the other datasets. Nothing is parsed from the reasoning; `graded` is the same kind of
+confidence. Cost is the difference: ~25 s per question for a 1.5B model and ~50 s for the 3B
+on the Air, against under a second for a letter score, so AQuA is most of the run time. The
+scores file keeps the reasoning text, its token count, whether it hit the cap, and the letter
+the model stated in text (for the record; it is not used).
 
 Two code datasets were built and then dropped from the workflow (Oct 24): `codemmlu` (489
 letter-scored knowledge questions) and `codegen` (HumanEval + MBPP, 421 problems scored by
@@ -49,8 +70,7 @@ prehistory high_school_world_history`; social `high_school_psychology sociology 
 high_school_macroeconomics us_foreign_policy`; other `clinical_knowledge nutrition management
 marketing computer_security`.
 
-Total 1,992 questions × 4 models ≈ 8,000 scored rows. (AQuA-RAT was the third set in the first
-run; letter-likelihood scoring cannot do multi-step arithmetic, so it was replaced by CommonsenseQA.) ARC has a variable option count, so the
+Total 2,246 questions × 3 models ≈ 6,700 scored rows. ARC has a variable option count, so the
 scorer must accept 3–5 options and the gate must use each question's own 1/k.
 
 **Split.** 70 / 30 train / test, stratified on `dataset × subject`, one fixed seed, written once
@@ -189,60 +209,64 @@ mac_pipeline/
   accuracy on them, per-question 1/k chance, one-sided binomial test, chance-corrected
   headroom; PASS / one-way / STOP. Pool-level oracle vs each single model.
 - Reuses the logic of `poc/analyze_poc.py`. Outputs `results/gate.csv` + `gate.md`.
-- **Decision point.** If no pool member passes both ways against another, the hybrid step is
-  skipped and the paper reports a plain cascade (dominance regime). If the base is at chance
-  on some dataset, that dataset is flagged; confidence there is noise.
+- **Decision point.** Routing gate: the generalist and the math model must be complementary
+  (each fixes some of the other's errors above chance), otherwise a router cannot beat the
+  dominant one and the route-only line in 05 should sit on it. Escalation gate: the 3B must fix
+  the routed models' errors above chance. If a model is at chance on some dataset, that dataset
+  is flagged; confidence there is noise.
 
 ### `04_train_router.py`
 - Train split only. Computes frozen `all-MiniLM-L6-v2` embeddings for every question once
   (`router/embeddings.npy`; this run is energy-tracked and its per-question cost saved as the
-  router overhead).
-- *Whether*: sweeps τ on the base's `graded` confidence with 5-fold OOF; stores the τ grid and
-  the τ that maximises train accuracy at each escalation fraction.
-- *Where*: for each pool model, logistic regression on `[confidence, PCA-32(embedding)]` →
-  P(model correct), 5-fold OOF, regularisation chosen by CV (as in
-  `poc/analyze_embedding_router_refine.py`). Also a subject-one-hot baseline router.
-- Writes `router/router.pkl`, `router/thresholds.json`, and OOF AUCs to `results/router_train.md`.
+  router overhead, charged on every question since the router runs before any model).
+- *Where* (ex-ante, text only): for each routed model, a classifier on `PCA-32(embedding)` →
+  P(model right), 5-fold OOF, regularisation by CV; subject-one-hot baseline; head ablation
+  (lr, rf, xgb, svc, mlp, voting) selected by OOF routed accuracy. The router picks the argmax.
+  Reports where the picks go per dataset (the math model should get AQuA and little else).
+- *Whether*: for each route, on the questions the OOF router sent there, sweeps τ on that
+  model's confidence and keeps τ[route] (best accuracy, ties to least escalation). Also one
+  global τ (ablation) and the τ of the plain cascade generalist → 3B.
+- Writes `router/router.pkl`, `router/thresholds.json` (`tau_per_route`, `tau_star` = global,
+  `tau_cascade`), and the OOF tables to `results/router_train.md`.
 
 ### `05_simulate.py`
 - Test split, stored scores, attributed energy. For every configuration, accuracy overall and
-  per dataset, energy (kWh), emissions (gCO₂e), seconds:
-  1. each single model (`base`, `qwen3b`, `phi4mini`, `llama3b`)
-  2. oracle over the pool, oracle over base+pool
-  3. plain cascade `base → X` for each X, τ grid
-  4. hybrid `base → router-picked pool member`, τ grid, with router overhead charged
-  5. random escalation at matched rate and cost-matched random line (`poc/analyze_cascade.py`)
-  6. cheapest cascade / hybrid point matching each single model's accuracy, degenerate flag
-- Charges the base's cost on every question and the escalated model's on escalated ones,
-  exactly as `poc/analyze_hybrid.py` does.
-- Outputs `results/simulated.csv`, `results/frontier.png` (accuracy vs kWh with the random line).
+  per dataset, energy (kWh), emissions (gCO₂e):
+  1. each single model (`generalist`, `math`, `qwen3b`)
+  2. oracle over the routed tier, oracle over all three
+  3. route-only: router pick, no escalation
+  4. plain cascade `generalist → qwen3b` and `math → qwen3b`, τ grid
+  5. route-cascade: router pick, then escalation at one global τ (grid) and at τ[route]
+  6. cost-matched random line over the singles; cheapest routed point matching each single
+- Charges the router on every question, the routed model on its questions, the 3B on the
+  escalated ones.
+- Outputs `results/simulated.csv`, `simulated.md`, `frontier.png`.
 
-### `06_run_end_to_end.py --tau T [--config hybrid|cascade:X]`
+### `06_run_end_to_end.py --config route-cascade|route|cascade:X|base|single:X [--tau T]`
 The live measurement, on the test split, with the deployed decision rule:
-- Pass 1 (tracked): `base` on every test question → confidence → escalation set.
-- Router pass (tracked): embed escalated questions, pick pool member.
-- Pass 2 (tracked, one model at a time): each pool model on the questions assigned to it.
-- Reported end-to-end energy = sum of the tracked passes. Grouping by model instead of
-  interleaving per query is a memory constraint (all four models resident would need ~23 GB);
-  the per-question computation is identical, and the paper says so.
-- Writes `results/end_to_end_<config>_<tau>.json` (accuracy, kWh, gCO₂e, escalation rate,
-  per-dataset breakdown, per-pass energy) and the per-question decision log
-  `results/end_to_end_<config>_<tau>_log.csv`:
-  `id, dataset, subject, n_options, gold, base_pred, base_correct, base_conf, escalated,
-  router_p_qwen3b, router_p_phi4mini, router_p_llama3b, chosen_model, final_pred,
-  final_correct, base_kwh_attr, router_kwh_attr, pool_kwh_attr, total_kwh_attr`.
-- Run for: the τ chosen on train for the hybrid; the same τ for the best plain cascade; and
-  τ=0 (always base) and τ=1 (always best single) as measured anchors.
+- Router pass (tracked, route* configs): embed every test question, pick the routed model.
+- Pass 1 (tracked, one model at a time): each routed model on its questions → confidence.
+- Pass 2 (tracked): the 3B on the questions whose confidence was below τ[route].
+- End-to-end energy = sum of the tracked passes. Grouping by model instead of interleaving per
+  query is a memory constraint; the per-question computation is identical, and the paper says so.
+- Writes `results/end_to_end_<config>.json` (accuracy, first-pass accuracy, kWh, gCO₂e,
+  escalation rate, per-dataset breakdown with routing split, per-pass energy) and the decision
+  log `results/end_to_end_<config>_log.csv`:
+  `id, dataset, subject, n_options, gold, first_model, router_p_generalist, router_p_math,
+  first_pred, first_correct, first_conf, tau_used, escalated, chosen_model, final_pred,
+  final_correct, router_kwh_attr, first_kwh_attr, pool_kwh_attr, total_kwh_attr`.
+- Run for: `route-cascade` (τ per route from train), `cascade:qwen3b` (τ from train, no
+  router), `base` (generalist alone) and `single:qwen3b` (always 3B) as measured anchors.
 
 ### `07_report.py`
 Builds the paper tables from `results/`:
 - **Table 1** per-model accuracy per dataset and overall; kWh, gCO₂e, seconds per 1,000
   questions (± from repeats only if `REPEATS` > 0).
-- **Table 2** gate matrix (12 ordered pairs).
-- **Table 3** end-to-end: always-base, always-best-single, plain cascade, hybrid, oracle;
-  accuracy, energy, emissions, escalation rate, Δ vs best single, Δ vs cost-matched random.
+- **Table 2** gate matrix (6 ordered pairs).
+- **Table 3** end-to-end: generalist alone, always-3B, plain cascade, route-cascade;
+  accuracy, energy, emissions, escalation rate, Δ vs best single.
 - **Table 4** simulated vs measured energy for the same configurations (validates attribution).
-- **Figure 1** accuracy–energy frontier with singles, cascade, hybrid, random line.
+- **Figure 1** accuracy–energy frontier with singles, cascades, route-cascade, random line.
 - **Figure 2** per-dataset gains.
 Markdown + CSV + PNG, all numbers traceable to a results file. Also writes
 `results/results.xlsx` — one sheet per table, generated from the same CSVs (openpyxl), so the
@@ -316,19 +340,18 @@ pip install -r mac_pipeline/requirements-mac.txt
 huggingface-cli login                      # Llama-3.2 is a gated repo; accept its licence on HF first
 sudo visudo                                # add: <user> ALL = (root) NOPASSWD: /usr/bin/powermetrics
 
-python mac_pipeline/01_build_questions.py                  # 1,992 questions + 70/30 split (already committed)
-python mac_pipeline/00_check_env.py --skip-models          # env + energy check; drop the flag to redo the prompt-format choice (~1 h)
-python mac_pipeline/02_score_model.py --role base
-python mac_pipeline/02_score_model.py --role qwen3b
-python mac_pipeline/02_score_model.py --role phi4mini
-python mac_pipeline/02_score_model.py --role llama3b
-python mac_pipeline/03_gate.py                             # decision: hybrid or cascade-only
+python mac_pipeline/01_build_questions.py                  # 2,246 questions + 70/30 split (already committed)
+python mac_pipeline/00_check_env.py --skip-models          # env + energy check; drop the flag to redo the prompt-format choice (~45 min)
+python mac_pipeline/02_score_model.py --role generalist    # ~2.3 h (AQuA reasoning is most of it)
+python mac_pipeline/02_score_model.py --role math          # ~2.3 h
+python mac_pipeline/02_score_model.py --role qwen3b        # ~5 h
+python mac_pipeline/03_gate.py                             # routing gate + escalation gate
 python mac_pipeline/04_train_router.py
 python mac_pipeline/05_simulate.py
-python mac_pipeline/06_run_end_to_end.py --config hybrid              # tau* from train
-python mac_pipeline/06_run_end_to_end.py --config cascade:<best pool member from gate.md>
-python mac_pipeline/06_run_end_to_end.py --config base
-python mac_pipeline/06_run_end_to_end.py --config single:<best single from simulated.md>
+python mac_pipeline/06_run_end_to_end.py --config base                 # generalist alone
+python mac_pipeline/06_run_end_to_end.py --config single:qwen3b        # always 3B
+python mac_pipeline/06_run_end_to_end.py --config cascade:qwen3b       # generalist -> 3B, tau from train
+python mac_pipeline/06_run_end_to_end.py --config route-cascade        # the method, tau per route
 python mac_pipeline/07_report.py                           # results/report.md + results.xlsx
 ```
 
