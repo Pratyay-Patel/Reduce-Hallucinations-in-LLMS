@@ -24,7 +24,9 @@ import argparse
 import json
 import os
 import pickle
+import subprocess
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config  # noqa: E402
@@ -49,7 +51,7 @@ def embed_all(q: pd.DataFrame, track: bool):
     texts = q["prompt_text"].tolist()
     if track:
         idle = energy.idle_baseline(min(config.IDLE_SECS, 30), "router_embed")
-        with energy.tracked("router_embed", precondition_heavy=True) as run:
+        with energy.tracked("router_embed") as run:
             E = encoder.encode(texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
         summ = energy.summarize_run(run, role="router", model_id=config.ROUTER_EMBEDDER,
                                     dataset="all", repeat=0, n=len(texts), idle=idle)
@@ -99,7 +101,7 @@ def make_head(name: str, seed: int = 0, C: float = 0.5):
     raise ValueError(name)
 
 
-def oof_auc(X, y, seed, C=0.5, head="lr"):
+def _oof_auc_local(X, y, seed, C=0.5, head="lr"):
     """5-fold out-of-fold probabilities and AUC. Scaler fitted inside each fold."""
     if y.sum() < 5 or (1 - y).sum() < 5:
         return np.nan, np.full(len(y), y.mean())
@@ -109,6 +111,31 @@ def oof_auc(X, y, seed, C=0.5, head="lr"):
         m = make_head(head, seed, C).fit(sc.transform(X[tr]), y[tr])
         p[te] = m.predict_proba(sc.transform(X[te]))[:, 1]
     return roc_auc_score(y, p), p
+
+
+def oof_auc(X, y, seed, C=0.5, head="lr"):
+    """Run XGBoost-backed heads outside the PyTorch process to avoid an arm64 native crash."""
+    if head not in ("xgb", "voting"):
+        return _oof_auc_local(X, y, seed, C, head)
+    # PyTorch/SentenceTransformers is loaded earlier for embeddings. In this macOS env,
+    # fitting XGBoost in that same process segfaults; an isolated child imports only the
+    # sklearn/XGBoost stack while retaining the exact same data and folds.
+    with tempfile.TemporaryDirectory(prefix="router_head_") as td:
+        in_path, out_path = os.path.join(td, "input.pkl"), os.path.join(td, "output.pkl")
+        with open(in_path, "wb") as f:
+            pickle.dump((X, y, seed, C, head), f, protocol=pickle.HIGHEST_PROTOCOL)
+        subprocess.run([sys.executable, os.path.abspath(__file__), "--router-head-worker",
+                        in_path, out_path], check=True)
+        with open(out_path, "rb") as f:
+            return pickle.load(f)
+
+
+def _router_head_worker(in_path, out_path):
+    with open(in_path, "rb") as f:
+        X, y, seed, C, head = pickle.load(f)
+    result = _oof_auc_local(X, y, seed, C, head)
+    with open(out_path, "wb") as f:
+        pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 def pca_features(E, seed=0):
@@ -134,6 +161,9 @@ def choose_tau(conf, c_route, c_esc):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--no-energy", action="store_true")
+    ap.add_argument("--heads", nargs="+", choices=config.ROUTER_HEADS,
+                    default=list(config.ROUTER_HEADS),
+                    help="router heads to compare for this run (default: all configured heads)")
     args = ap.parse_args()
 
     q = load_questions()
@@ -183,7 +213,7 @@ def main():
         print(f"{r}: acc {y.mean():.3f}  AUC emb {best_a:.3f}  subject {a_s:.3f}  C={best_c}")
 
     # head ablation: OOF routed accuracy of each head's argmax picks, against the singles and oracle
-    heads = list(config.ROUTER_HEADS)
+    heads = list(args.heads)
     lines += ["", "## Head ablation (PCA32 features, OOF)", "",
               "| head | " + " | ".join(f"AUC {r}" for r in routed) + " | mean AUC | routed acc | " +
               " | ".join(f"always-{r}" for r in routed) + " | oracle |",
@@ -308,4 +338,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) >= 2 and sys.argv[1] == "--router-head-worker":
+        if len(sys.argv) != 4:
+            raise SystemExit("internal router-head worker expects input and output pickle paths")
+        _router_head_worker(sys.argv[2], sys.argv[3])
+    else:
+        main()

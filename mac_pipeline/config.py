@@ -124,7 +124,7 @@ PCA_DIMS = 32
 ROUTER_SEEDS = (0, 1, 42, 7)
 # router heads compared out-of-fold in 04; "auto" picks the best OOF routed accuracy (ties by AUC).
 # lr is the literature default for dense embeddings; rf/xgb/svc/mlp/voting are the classifier
-# families the paper used on the 8 NeMo features, kept as an ablation.
+# families kept for the out-of-fold router-head ablation.
 ROUTER_HEADS = ("lr", "rf", "xgb", "svc", "mlp", "voting")
 ROUTER_HEAD = "auto"
 

@@ -39,8 +39,11 @@ def sample_powermetrics(seconds: int) -> dict:
     mean = lambda xs: sum(xs) / len(xs) if xs else None
     # Thermal pressure is categorical. Keep the most severe state observed in this window.
     pressure = max(pressures, key=lambda x: PRESSURE_ORDER.get(x.lower(), -1)) if pressures else None
-    return {"pressure": pressure, "cpu_w": mean(cpu), "gpu_w": mean(gpu),
-            "soc_w": mean(combined), "cpu_ghz": mean(ghz), "samples": len(combined)}
+    # powermetrics reports these power fields in mW; store/display them in W.
+    return {"pressure": pressure, "cpu_w": mean(cpu) / 1000 if cpu else None,
+            "gpu_w": mean(gpu) / 1000 if gpu else None,
+            "soc_w": mean(combined) / 1000 if combined else None,
+            "cpu_ghz": mean(ghz), "samples": len(combined)}
 
 
 def workload(stop: threading.Event, size: int, device: str):
