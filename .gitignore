@@ -1,5 +1,6 @@
 .env
 env/
+.venv/
 venv/
 Classification_model/venv/
 __pycache__/

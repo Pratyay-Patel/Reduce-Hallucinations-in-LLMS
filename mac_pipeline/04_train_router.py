@@ -45,12 +45,12 @@ C_GRID = (0.1, 0.3, 1.0, 3.0)
 
 def embed_all(q: pd.DataFrame, track: bool):
     from sentence_transformers import SentenceTransformer
+    encoder = SentenceTransformer(config.ROUTER_EMBEDDER)
     texts = q["prompt_text"].tolist()
     if track:
         idle = energy.idle_baseline(min(config.IDLE_SECS, 30), "router_embed")
-        with energy.tracked("router_embed") as run:
-            E = SentenceTransformer(config.ROUTER_EMBEDDER).encode(
-                texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
+        with energy.tracked("router_embed", precondition_heavy=True) as run:
+            E = encoder.encode(texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
         summ = energy.summarize_run(run, role="router", model_id=config.ROUTER_EMBEDDER,
                                     dataset="all", repeat=0, n=len(texts), idle=idle)
         rec = energy.record_kwh(summ)
@@ -59,8 +59,7 @@ def embed_all(q: pd.DataFrame, track: bool):
         print(f"embedding energy: {rec * 1000:.4f} Wh for {len(texts)} q  "
               f"({summ['kwh_per_question'] * 3.6e6:.3f} J/q)")
     else:
-        E = SentenceTransformer(config.ROUTER_EMBEDDER).encode(
-            texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
+        E = encoder.encode(texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
     np.save(config.ROUTER_DIR / "embeddings.npy", E)
     pd.Series(q["id"]).to_csv(config.ROUTER_DIR / "embedding_ids.csv", index=False)
     return E
@@ -78,11 +77,13 @@ def make_head(name: str, seed: int = 0, C: float = 0.5):
         return LogisticRegression(max_iter=4000, C=C)
     if name == "rf":
         from sklearn.ensemble import RandomForestClassifier
-        return RandomForestClassifier(n_estimators=300, min_samples_leaf=5, random_state=seed, n_jobs=-1)
+        # Keep CV fits single-worker on macOS: joblib process pools can leave leaked
+        # semaphores and compete with the native OpenMP runtime used by XGBoost.
+        return RandomForestClassifier(n_estimators=300, min_samples_leaf=5, random_state=seed, n_jobs=1)
     if name == "xgb":
         from xgboost import XGBClassifier
         return XGBClassifier(n_estimators=300, max_depth=3, learning_rate=0.05, subsample=0.8,
-                             colsample_bytree=0.8, reg_lambda=1.0, random_state=seed, n_jobs=-1,
+                             colsample_bytree=0.8, reg_lambda=1.0, random_state=seed, n_jobs=1,
                              eval_metric="logloss", verbosity=0)
     if name == "svc":
         from sklearn.svm import SVC

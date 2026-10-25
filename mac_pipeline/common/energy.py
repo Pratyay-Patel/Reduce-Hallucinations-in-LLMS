@@ -24,10 +24,12 @@ import json
 import platform
 import re
 import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 
@@ -185,9 +187,19 @@ def thermal_info() -> dict:
 
 # ----------------------------------------------------------------------------- tracked runs
 @contextmanager
-def tracked(project_name: str):
+def tracked(project_name: str, *, precondition_heavy: bool = False):
     """Usage:  with tracked("score_base_mmlu") as run: ...
-    run["data"] = CodeCarbon summary, run["soc"] = powermetrics integration."""
+    run["data"] = CodeCarbon summary, run["soc"] = powermetrics integration.
+    If requested, reach stable Heavy thermal pressure before either tracker starts."""
+    if precondition_heavy and IS_MAC:
+        warmup = Path(__file__).resolve().parents[1] / "thermal_stabilize.py"
+        cmd = [sys.executable, str(warmup), "--target-pressure", "heavy",
+               "--stable-windows", "2", "--max-minutes", "45"]
+        print(f"[Thermal] preconditioning to stable Heavy before '{project_name}'", flush=True)
+        rc = subprocess.run(cmd, check=False).returncode
+        if rc:
+            raise RuntimeError(f"Thermal preconditioning failed for '{project_name}' (exit {rc}); "
+                               "energy tracking was not started.")
     t = _tracker(project_name)
     pm = PowermetricsSampler(config.MEASURE_POWER_SECS * 1000)
     run = {"project": project_name, "t0": time.perf_counter()}

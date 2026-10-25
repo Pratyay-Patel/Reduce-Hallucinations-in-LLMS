@@ -77,7 +77,7 @@ def main():
             from contextlib import nullcontext
             ctx = nullcontext({"data": {}})
         else:
-            ctx = energy.tracked(f"score_{tag}")
+            ctx = energy.tracked(f"score_{tag}", precondition_heavy=True)
         with ctx as run:
             for k, (_, r) in enumerate(sub.iterrows()):
                 s = score_row(scorer, r)

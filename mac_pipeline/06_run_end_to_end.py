@@ -51,7 +51,7 @@ def run_model(role, sub: pd.DataFrame, tag: str, device, no_energy: bool, idle_s
         from contextlib import nullcontext
         ctx = nullcontext({"data": {}})
     else:
-        ctx = energy.tracked(tag)
+        ctx = energy.tracked(tag, precondition_heavy=True)
     with ctx as run:
         for _, r in sub.iterrows():
             s = score_row(sc, r)
@@ -143,15 +143,15 @@ def main():
             with open(config.ROUTER_DIR / "router.pkl", "rb") as f:
                 router = pickle.load(f)
             from sentence_transformers import SentenceTransformer
+            encoder = SentenceTransformer(config.ROUTER_EMBEDDER)
             texts = test["prompt_text"].tolist()
             if args.no_energy:
                 from contextlib import nullcontext
                 ctx = nullcontext({"data": {}})
             else:
-                ctx = energy.tracked(f"e2e_{name}_router")
+                ctx = energy.tracked(f"e2e_{name}_router", precondition_heavy=True)
             with ctx as run:
-                E = SentenceTransformer(config.ROUTER_EMBEDDER).encode(
-                    texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
+                E = encoder.encode(texts, batch_size=64, show_progress_bar=False, normalize_embeddings=True)
                 P = np.vstack([router["models"][r]["clf"].predict_proba(
                     router["models"][r]["scaler"].transform(router["models"][r]["pca"].transform(E)))[:, 1]
                     for r in routed])
